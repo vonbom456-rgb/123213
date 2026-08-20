@@ -44,16 +44,14 @@ struct Config {
     bool use_permissions = false;
     std::string permission = "TurretControl.Default";
 
-    // Purely cosmetic: spawns an admin-supplied actor (particle/decal/mesh
-    // blueprint) at the player when /fill runs, so they can see roughly how
-    // far the search radius reaches. Off by default because this plugin has
-    // no way to verify a specific game-content blueprint path exists on your
-    // server -- that part is game content, not API, so it can't be shipped
-    // pre-filled. Point it at any ring/circle-style actor you already have
-    // (from a mod, or one you build yourself) and give that actor its own
-    // lifespan (e.g. Set Life Span in its Blueprint) so it disappears on its
-    // own; this plugin does not track or destroy what it spawns.
-    bool fill_radius_hologram_enabled = false;
+    // Purely cosmetic range preview. The native sphere needs no mod or asset
+    // path and is sent through the requesting player's controller, so it is
+    // visible only to that player. The optional Blueprint actor remains as a
+    // fallback for servers that already own a custom visual asset.
+    bool fill_radius_hologram_enabled = true;
+    bool fill_radius_native_sphere = true;
+    float fill_radius_sphere_duration = 6.0f;
+    int fill_radius_sphere_segments = 64;
     std::string fill_radius_hologram_blueprint;
     float fill_radius_hologram_spawn_distance = 0.0f;
     float fill_radius_hologram_spawn_y_offset = 0.0f;
@@ -404,14 +402,14 @@ int TransferFamily(UPrimalInventoryComponent* from, UPrimalInventoryComponent* t
             const int refunded = AddExact(from, actual_class, kind, refund);
             if (refunded != refund) {
                 Log::GetLog()->error(
-                    "TurretControl v1.3: refund failed. class='{}' expected={} refunded={}",
+                    "TurretControl v1.5: refund failed. class='{}' expected={} refunded={}",
                     GetClassFullName(actual_class), refund, refunded);
             }
         }
 
         const int turret_after = FamilyQuantity(to, kind);
         Log::GetLog()->info(
-            "TurretControl v1.3 fill: turret='{}' template='{}' player_class='{}' player_before={} turret_before={} requested={} removed={} added={} turret_after={}",
+            "TurretControl v1.5 fill: turret='{}' template='{}' player_class='{}' player_before={} turret_before={} requested={} removed={} added={} turret_after={}",
             GetClassFullName(turret),
             GetClassFullName(turret->AmmoItemTemplateField().uClass),
             GetClassFullName(actual_class),
@@ -545,13 +543,25 @@ bool IsPvpBlocked(AShooterPlayerController* pc) {
     return g_pvp_checker(pc);
 }
 
-// Purely cosmetic. Uses the verified ArkApi 3.56 AShooterPlayerController::SpawnActor
-// helper to drop an admin-chosen actor at the player so they can see roughly
-// where /fill searches. No-op until FillRadiusHologram.BlueprintPath is set
-// in config.json -- see the Config struct comment for why this ships empty.
+// Purely cosmetic. The native debug sphere is a shipping-enabled ARK RPC and
+// has no collision or gameplay actor. Calling the multicast RPC on the player
+// controller confines it to that controller's owning client in normal network
+// relevancy. An optional custom Blueprint actor can also be spawned.
 void SpawnFillRadiusHologram(AShooterPlayerController* pc) {
     if (!g_config.fill_radius_hologram_enabled) return;
-    if (!pc || g_config.fill_radius_hologram_blueprint.empty()) return;
+    if (!pc) return;
+
+    AShooterCharacter* character = pc->GetPlayerCharacter();
+    if (g_config.fill_radius_native_sphere && character && character->RootComponentField()) {
+        const FVector center = character->RootComponentField()->RelativeLocationField();
+        const int segments = std::max(8, std::min(128, g_config.fill_radius_sphere_segments));
+        const float duration = std::max(0.5f, g_config.fill_radius_sphere_duration);
+        pc->MulticastDrawDebugSphere(
+            center, g_config.fill_radius, segments,
+            FLinearColor(0.0f, 1.0f, 0.1f, 1.0f), duration, true);
+    }
+
+    if (g_config.fill_radius_hologram_blueprint.empty()) return;
 
     FString blueprint_path(g_config.fill_radius_hologram_blueprint.c_str());
     pc->SpawnActor(
@@ -637,14 +647,14 @@ void FillCommandImpl(AShooterPlayerController* pc, FString*, EChatSendMode::Type
             else arb_used -= std::min(arb_used, refunded);
 
             Log::GetLog()->warn(
-                "TurretControl v1.3 /fill safety cap: turret='{}' kind={} before={} after={} limit={} overflow_removed={} refunded_to_player={}",
+                "TurretControl v1.5 /fill safety cap: turret='{}' kind={} before={} after={} limit={} overflow_removed={} refunded_to_player={}",
                 GetClassFullName(ref.turret), static_cast<int>(ref.kind), live_before, after, limit, removed, refunded);
         }
     }
 
     if (filled_turrets <= 0) {
         Log::GetLog()->warn(
-            "TurretControl v1.3: /fill found {} valid turrets but transferred nothing. ARB={} Shards={}",
+            "TurretControl v1.5: /fill found {} valid turrets but transferred nothing. ARB={} Shards={}",
             turrets.size(), arb_available, shards_available);
         Send(pc, g_config.fill_failed);
         return;
@@ -776,7 +786,7 @@ bool Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity(
         *requested_quantity_out = allowed;
 
     Log::GetLog()->debug(
-        "TurretControl v1.3 inventory cap: turret='{}' item='{}' current={} limit={} requested={} original_allowed={} final_allowed={}",
+        "TurretControl v1.5 inventory cap: turret='{}' item='{}' current={} limit={} requested={} original_allowed={} final_allowed={}",
         GetClassFullName(turret),
         GetClassFullName(item),
         current,
@@ -909,12 +919,15 @@ void HardCapTimer() {
             }
 
             Log::GetLog()->warn(
-                "TurretControl v1.3 hard cap: turret='{}' kind={} current={} limit={} overflow={} removed={} refunded={}",
+                "TurretControl v1.5 hard cap: turret='{}' kind={} current={} limit={} overflow={} removed={} refunded={}",
                 GetClassFullName(turret), static_cast<int>(kind), current, limit, overflow, removed, refunded);
         }
     }
 }
 
+// Do not install the global inventory hook or scan structures while ARK is
+// restoring the save. Both operations are postponed until a valid game mode
+// and game state have existed for StartupDelaySeconds.
 void RuntimeTimer() {
     UWorld* world = ArkApi::GetApiUtils().GetWorld();
     if (!world || !world->AuthorityGameModeField() || !world->GameStateField()) {
@@ -934,7 +947,7 @@ void RuntimeTimer() {
         g_runtime_ready = true;
         ApplyInventoryHookState();
         Log::GetLog()->info(
-            "TurretControl v1.4 runtime enabled after world startup (InventoryCap={}, HardCap={})",
+            "TurretControl v1.5 runtime enabled after world startup (InventoryCap={}, HardCap={})",
             g_config.inventory_cap_enabled, g_config.hard_cap_enabled);
     }
 
@@ -986,6 +999,9 @@ Config ParseConfig(const minijson::Value& root) {
     c.permission = minijson::str(root, "Permissions", "DefaultPermission", c.permission);
 
     c.fill_radius_hologram_enabled = minijson::boolean(root, "FillRadiusHologram", "Enabled", c.fill_radius_hologram_enabled);
+    c.fill_radius_native_sphere = minijson::boolean(root, "FillRadiusHologram", "NativeDebugSphere", c.fill_radius_native_sphere);
+    c.fill_radius_sphere_duration = minijson::number(root, "FillRadiusHologram", "DurationSeconds", c.fill_radius_sphere_duration);
+    c.fill_radius_sphere_segments = minijson::integer(root, "FillRadiusHologram", "Segments", c.fill_radius_sphere_segments);
     c.fill_radius_hologram_blueprint = minijson::str(root, "FillRadiusHologram", "BlueprintPath", c.fill_radius_hologram_blueprint);
     c.fill_radius_hologram_spawn_distance = minijson::number(root, "FillRadiusHologram", "SpawnDistance", c.fill_radius_hologram_spawn_distance);
     c.fill_radius_hologram_spawn_y_offset = minijson::number(root, "FillRadiusHologram", "SpawnYOffset", c.fill_radius_hologram_spawn_y_offset);
@@ -1099,7 +1115,7 @@ void Load() {
     g_inventory_hook_installed = false;
     ArkApi::GetCommands().AddOnTimerCallback("TurretControl.Runtime", &RuntimeTimer);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.Reload", &ReloadCommand);
-    Log::GetLog()->info("Loaded plugin - TurretControl v1.4 SafeStartup");
+    Log::GetLog()->info("Loaded plugin - TurretControl v1.5 FillRangeSphere");
 }
 
 void Unload() {

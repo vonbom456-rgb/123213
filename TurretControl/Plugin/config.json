@@ -20,7 +20,10 @@
     "DefaultPermission": "TurretControl.Default"
   },
   "FillRadiusHologram": {
-    "Enabled": false,
+    "Enabled": true,
+    "NativeDebugSphere": true,
+    "DurationSeconds": 6,
+    "Segments": 64,
     "BlueprintPath": "",
     "SpawnDistance": 0,
     "SpawnYOffset": 0,

@@ -1,6 +1,19 @@
-# TurretControl 1.0 — ASE ArkApi 3.56
+# TurretControl 1.5 — ASE ArkApi 3.56
 
 `TurretControl` is a server-side plugin for **ARK: Survival Evolved (ASE)**. It is not an ASA/CurseForge mod.
+
+## Safe startup defaults
+
+`HardCapEnabled` and `InventoryCapEnabled` are disabled by default. The global
+inventory hook is not installed at all while InventoryCap is disabled. When a
+cap is explicitly enabled, runtime work waits for a valid GameMode/GameState
+and then an additional `StartupDelaySeconds` (default 60), so ARK can restore
+the save before the plugin scans or hooks turret inventories.
+
+Enable `HardCapEnabled` first after confirming a clean startup.
+`InventoryCapEnabled` should be treated as experimental because other server
+plugins can hook the same global inventory function. The periodic hard cap is
+the safer enforcement mode.
 
 Target environment:
 
@@ -41,11 +54,18 @@ This design is intended to prevent a failed removal from becoming duplicated amm
 
 ### Radius hologram on `/fill`
 
-`FillRadiusHologram` in `config.json` can spawn a visual actor at the player the moment `/fill` runs, so they can see roughly where the search radius reaches:
+`FillRadiusHologram` shows a green native ARK debug sphere at the player when
+`/fill` runs. Its radius is exactly `General.FillRadius`; it has no collision,
+does not spawn a gameplay structure, needs no client mod and disappears by
+itself. Because it is sent through the requesting player controller, normally
+only that player sees it.
 
 ```json
 "FillRadiusHologram": {
-  "Enabled": false,
+  "Enabled": true,
+  "NativeDebugSphere": true,
+  "DurationSeconds": 6,
+  "Segments": 64,
   "BlueprintPath": "",
   "SpawnDistance": 0,
   "SpawnYOffset": 0,
@@ -53,14 +73,21 @@ This design is intended to prevent a failed removal from becoming duplicated amm
 }
 ```
 
-This is **off by default and ships with an empty `BlueprintPath`** on purpose. The plugin spawns whatever actor class you point it at (via the ArkApi `AShooterPlayerController::SpawnActor` helper), but a ring/circle-style visual is game *content* -- it lives in the game's `.pak` files, not in the ArkApi SDK -- so there is no such asset path this plugin can verify or ship pre-filled. To use it:
+The native sphere is enabled by default. `DurationSeconds` controls how long it
+remains and `Segments` controls smoothness. Its upper half looks like a green
+dome above normal terrain.
+
+`BlueprintPath` is an optional, separate fallback. If supplied, the plugin also
+spawns that visual actor through `AShooterPlayerController::SpawnActor`:
 
 1. Find or build an actor Blueprint that renders as a ring/circle (many raid-protection or base-radius mods already ship one you can point at; or make a small one yourself in the Dev Kit).
 2. Give **that Blueprint** its own lifespan (e.g. `Set Life Span` in its own Event Graph) so it disappears after a few seconds on its own -- this plugin does not track or destroy what it spawns, it only spawns it once per `/fill`.
-3. Set `BlueprintPath` to that actor's full class path and `Enabled` to `true`.
+3. Set `BlueprintPath` to that actor's full class path. Set
+   `NativeDebugSphere` to `false` if you want only the custom visual.
 4. `SpawnDistance` / `SpawnYOffset` / `SpawnZOffset` are passed straight through to `SpawnActor` and control where relative to the player it appears; `0, 0, 0` spawns it at the player's own position.
 
-Note this only places the indicator at the player -- it does not scale it to match your configured `FillRadius`. If you want the visual size to track the radius, size the Blueprint itself to your chosen `FillRadius`/`HardCapScanRadius` values, since this plugin has no verified way to resize an arbitrary actor at spawn time.
+The optional Blueprint is not automatically scaled. The native sphere always
+tracks `FillRadius` exactly.
 
 ## Inventory cap enforcement
 
