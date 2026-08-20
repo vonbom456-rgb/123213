@@ -29,7 +29,7 @@
   },
   "CombatLogout": {
     "Enabled": true,
-    "KillCharacter": true,
+    "KillCharacter": false,
     "PenaltySeconds": 600
   },
   "SoftORP": {
@@ -54,6 +54,6 @@
     "SelfCheckNone": "RAID / PVP timer is not active.",
     "Reminder": "RAID / PVP: {0}s remaining.",
     "CommandBlocked": "RAID / PVP: {0}s remaining. Command is blocked.",
-    "CombatLogout": "Combat logout detected: character killed, RAID / PVP extended to {0}s."
+    "CombatLogout": "Combat logout detected: RAID / PVP extended to {0}s."
   }
 }

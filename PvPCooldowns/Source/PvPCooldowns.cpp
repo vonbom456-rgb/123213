@@ -60,7 +60,7 @@ struct Config {
     };
 
     bool combat_logout_enabled = true;
-    bool combat_logout_kill_character = true;
+    bool combat_logout_kill_character = false;
     int combat_logout_penalty_seconds = 600;
 
     bool soft_orp_enabled = true;
@@ -84,7 +84,7 @@ struct Config {
     std::string self_check_none = "RAID / PVP timer is not active.";
     std::string reminder = "RAID / PVP: {0}s remaining.";
     std::string command_blocked = "RAID / PVP: {0}s remaining. Command is blocked.";
-    std::string combat_logout = "Combat logout detected: character killed, RAID / PVP extended to {0}s.";
+    std::string combat_logout = "Combat logout detected: RAID / PVP extended to {0}s.";
 };
 
 Config g_config;
