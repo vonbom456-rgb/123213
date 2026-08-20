@@ -68,7 +68,8 @@ std::string FormatMessage(const std::string& tmpl, float amount, Category cat) {
 
 void SendColored(AShooterPlayerController* pc, const std::string& text, const FLinearColor& color) {
     if (!pc || text.empty()) return;
-    ArkApi::GetApiUtils().SendServerMessage(pc, color, FString(ArkApi::Tools::Utf8Decode(text).c_str()));
+    const FString message(ArkApi::Tools::Utf8Decode(text).c_str());
+    ArkApi::GetApiUtils().SendServerMessage(pc, color, *message);
 }
 
 // Pending aggregation: steam_id / tribe_id -> category index -> summed damage.

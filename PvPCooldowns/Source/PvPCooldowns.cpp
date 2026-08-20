@@ -58,8 +58,8 @@ std::string ReplaceToken(const std::string& text, const std::string& token, cons
 
 void Send(AShooterPlayerController* pc, const std::string& text) {
     if (!pc || text.empty()) return;
-    ArkApi::GetApiUtils().SendServerMessage(pc, FColorList::Yellow,
-        FString(ArkApi::Tools::Utf8Decode(text).c_str()));
+    const FString message(ArkApi::Tools::Utf8Decode(text).c_str());
+    ArkApi::GetApiUtils().SendServerMessage(pc, FColorList::Yellow, *message);
 }
 
 // steam_id -> cooldown expiry

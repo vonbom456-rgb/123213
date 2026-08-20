@@ -72,10 +72,13 @@ try {
         Write-Host "No new changes to commit." -ForegroundColor DarkGray
     }
 
-    Write-Host "[6/7] Checking that the repository is empty..." -ForegroundColor Cyan
+    Write-Host "[6/7] Syncing existing repository if needed..." -ForegroundColor Cyan
     cmd /c "git ls-remote --exit-code --heads origin main >nul 2>nul"
     if ($LASTEXITCODE -eq 0) {
-        throw "Remote main already exists. Create a NEW empty GitHub repository to avoid overwriting other work."
+        git pull --rebase origin main
+        if ($LASTEXITCODE -ne 0) {
+            throw "git pull --rebase failed. Resolve the repository conflict before retrying."
+        }
     }
 
     Write-Host "[7/7] Pushing to GitHub..." -ForegroundColor Cyan
