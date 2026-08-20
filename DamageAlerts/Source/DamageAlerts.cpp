@@ -44,6 +44,7 @@ struct Config {
     int min_tribe_team_id = 50000;
     bool floating_damage_enabled = true;
     bool force_native_server_setting = true;
+    bool show_enemy_damage_to_victim_tribe = true;
     bool also_send_attacker_chat = false;
     float floating_damage_vertical_offset = 100.0f;
     std::string test_command = "/datest";
@@ -74,6 +75,32 @@ void SendColored(AShooterPlayerController* pc, const std::string& text, const FL
     if (!pc || text.empty()) return;
     const FString message(ArkApi::Tools::Utf8Decode(text).c_str());
     ArkApi::GetApiUtils().SendServerMessage(pc, color, *message);
+}
+
+void SendEnemyFloatingDamage(AActor* target, int victim_team, int attacker_team, float amount) {
+    if (!g_config.floating_damage_enabled || !g_config.show_enemy_damage_to_victim_tribe ||
+        !target || amount < g_config.min_damage_to_report) return;
+
+    FVector location{};
+    FVector extent{};
+    target->GetActorBounds(false, &location, &extent);
+    location.Z += g_config.floating_damage_vertical_offset;
+    const int displayed_damage = std::max(1, static_cast<int>(std::llround(amount)));
+
+    UWorld* world = ArkApi::GetApiUtils().GetWorld();
+    if (!world) return;
+    for (TWeakObjectPtr<APlayerController> weak_pc : world->PlayerControllerListField()) {
+        auto* base_pc = weak_pc.Get();
+        if (!base_pc || !base_pc->IsA(AShooterPlayerController::GetPrivateStaticClass())) continue;
+        auto* pc = static_cast<AShooterPlayerController*>(base_pc);
+        if (ArkApi::GetApiUtils().GetTribeID(pc) != victim_team) continue;
+
+        // Passing the enemy attacker's team lets ARK apply its native enemy
+        // colour (red) for every victim-tribe client. No client mod is needed.
+        pc->ClientAddFloatingDamageText(
+            FVector_NetQuantize(location), displayed_damage, attacker_team);
+        ++g_floating_rpc_events;
+    }
 }
 
 // Pending aggregation: steam_id / tribe_id -> category index -> summed damage.
@@ -152,8 +179,12 @@ void RecordDamage(AActor* target, AController* event_instigator, AActor* damage_
 
     // Only alert the victim's tribe if the target is actually owned by a
     // tribe and the damage came from a genuinely different tribe.
-    if (g_config.notify_victim_tribe && IsPlayerOwnedTeam(target_team) &&
-        IsPlayerOwnedTeam(attacker.team) && attacker.team != target_team) {
+    const bool enemy_tribe_damage = IsPlayerOwnedTeam(target_team) &&
+        IsPlayerOwnedTeam(attacker.team) && attacker.team != target_team;
+    if (enemy_tribe_damage) {
+        SendEnemyFloatingDamage(target, target_team, attacker.team, amount);
+    }
+    if (g_config.notify_victim_tribe && enemy_tribe_damage) {
         g_pending_victim[target_team][static_cast<int>(cat)] += amount;
     }
 }
@@ -266,6 +297,8 @@ Config ParseConfig(const minijson::Value& root) {
     c.floating_damage_enabled = minijson::boolean(root, "FloatingDamage", "Enabled", c.floating_damage_enabled);
     c.force_native_server_setting = minijson::boolean(
         root, "FloatingDamage", "ForceNativeServerSetting", c.force_native_server_setting);
+    c.show_enemy_damage_to_victim_tribe = minijson::boolean(
+        root, "FloatingDamage", "ShowEnemyDamageToVictimTribe", c.show_enemy_damage_to_victim_tribe);
     c.also_send_attacker_chat = minijson::boolean(root, "FloatingDamage", "AlsoSendAttackerChat", c.also_send_attacker_chat);
     c.floating_damage_vertical_offset = minijson::number(
         root, "FloatingDamage", "VerticalOffset", c.floating_damage_vertical_offset);
@@ -304,7 +337,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
     }
 
     std::ostringstream status;
-    status << "DamageAlerts v1.4 DamageAndEnemyAlert OK | native="
+    status << "DamageAlerts v1.5 RedEnemyNumbers OK | native="
            << (g_native_floating_applied ? "ON" : "WAIT")
            << " | character_hits=" << g_character_damage_events
            << " | structure_hits=" << g_structure_damage_events
@@ -316,7 +349,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 
 void Load() {
     Log::Get().Init("DamageAlerts");
-    Log::GetLog()->info("Loading plugin - DamageAlerts v1.4 DamageAndEnemyAlert");
+    Log::GetLog()->info("Loading plugin - DamageAlerts v1.5 RedEnemyNumbers");
 
     try {
         DamageAlerts::ReadConfig();

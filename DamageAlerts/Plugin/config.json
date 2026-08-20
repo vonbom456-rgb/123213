@@ -9,6 +9,7 @@
   "FloatingDamage": {
     "Enabled": true,
     "ForceNativeServerSetting": true,
+    "ShowEnemyDamageToVictimTribe": true,
     "AlsoSendAttackerChat": false,
     "VerticalOffset": 100.0
   },

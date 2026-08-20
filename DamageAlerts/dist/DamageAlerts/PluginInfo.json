@@ -1,7 +1,7 @@
 {
   "FullName": "DamageAlerts",
-  "Description": "Native damage numbers for the attacker plus a red alert only when an enemy tribe damages the victim tribe",
-  "Version": 1.4,
+  "Description": "Native outgoing damage numbers plus red floating enemy-damage numbers and alerts for the victim tribe",
+  "Version": 1.5,
   "MinApiVersion": 3.56,
   "Dependencies": []
 }

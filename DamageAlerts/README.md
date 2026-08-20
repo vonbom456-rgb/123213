@@ -1,8 +1,9 @@
-# DamageAlerts 1.4 — DamageAndEnemyAlert
+# DamageAlerts 1.5 — RedEnemyNumbers
 
-Native ARK floating damage numbers for the player dealing damage, plus a red
-warning to the victim tribe only for damage from a different player-owned
-tribe. PvPCooldowns separately handles the persistent raid timer.
+Native ARK floating damage numbers for the player dealing damage. When a
+different player-owned tribe attacks, the victim tribe also receives native
+enemy-coloured floating numbers at the damaged target and a red text warning.
+PvPCooldowns separately handles the persistent raid timer.
 
 Version 1.3 forces ARK's own server-side floating-damage setting. Use
 `/datest` in chat to send a `12345` test number and show live hook counters.
@@ -27,6 +28,7 @@ so rapid hits (turret fire, DoT) become one line, not spam.
   "FloatingDamage": {
     "Enabled": true,
     "ForceNativeServerSetting": true,
+    "ShowEnemyDamageToVictimTribe": true,
     "AlsoSendAttackerChat": false,
     "VerticalOffset": 100.0
   },
@@ -46,6 +48,9 @@ so rapid hits (turret fire, DoT) become one line, not spam.
   colours the number on the client, so there is no custom HUD asset or mod.
 - `FloatingDamage.AlsoSendAttackerChat` — also retain the old aggregated green
   chat line (disabled by default to avoid duplicate feedback).
+- `FloatingDamage.ShowEnemyDamageToVictimTribe` — sends native floating damage
+  to online victim-tribe clients using the enemy attacker's team, so ARK applies
+  its normal enemy colour (red).
 - `FloatingDamage.VerticalOffset` — moves the number upward from the target's
   root position, in Unreal units.
 - `NotifyVictimTribeOnEnemyHit` sends a red warning only when the damage came
