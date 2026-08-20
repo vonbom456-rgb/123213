@@ -334,7 +334,14 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
         FVector location{};
         FRotator rotation{};
         pc->GetPlayerViewPoint(&location, &rotation);
-        location += rotation.Vector() * 600.0f;
+        constexpr float degrees_to_radians = 3.14159265358979323846f / 180.0f;
+        const float pitch = rotation.Pitch * degrees_to_radians;
+        const float yaw = rotation.Yaw * degrees_to_radians;
+        const FVector forward(
+            std::cos(pitch) * std::cos(yaw),
+            std::cos(pitch) * std::sin(yaw),
+            std::sin(pitch));
+        location += forward * 600.0f;
         location.Z += 50.0f;
         const int team = ArkApi::GetApiUtils().GetTribeID(pc);
         pc->ClientAddFloatingDamageText(FVector_NetQuantize(location), 12345, team);
