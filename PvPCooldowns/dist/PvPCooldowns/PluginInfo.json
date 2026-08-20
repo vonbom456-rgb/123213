@@ -1,0 +1,7 @@
+{
+  "FullName": "PvPCooldowns",
+  "Description": "Puts a player on a PvP cooldown when they are killed by another tribe (a player or their turret), so other plugins can block commands during it",
+  "Version": 1.1,
+  "MinApiVersion": 3.56,
+  "Dependencies": []
+}

@@ -1,0 +1,18 @@
+{
+  "General": {
+    "MinDamageToReport": 1.0,
+    "FlushIntervalSeconds": 1,
+    "NotifyAttacker": true,
+    "NotifyVictimTribeOnEnemyHit": true,
+    "MinTribeTeamId": 50000
+  },
+  "FloatingDamage": {
+    "Enabled": true,
+    "AlsoSendAttackerChat": false,
+    "VerticalOffset": 100.0
+  },
+  "Messages": {
+    "AttackerHit": "+{0} урона по {1}",
+    "VictimHit": "-{0} урона по {1} (враг)"
+  }
+}

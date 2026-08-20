@@ -1,0 +1,19 @@
+{
+  "General": {
+    "CooldownSeconds": 45,
+    "ShowMessages": true,
+    "SelfCheckCommand": "/pvpcd",
+    "ReminderIntervalSeconds": 15,
+    "MinTribeTeamId": 50000
+  },
+  "HudBuff": {
+    "Enabled": true,
+    "BlueprintPath": "/Game/Mods/PvPCooldowns/Buff_PvPCooldown.Buff_PvPCooldown_C"
+  },
+  "Messages": {
+    "CooldownStarted": "PvP cooldown started: {0}s. Some commands (like /fill) are blocked until it ends.",
+    "SelfCheckOnCooldown": "PvP cooldown: {0}s remaining.",
+    "SelfCheckNone": "You are not on PvP cooldown.",
+    "Reminder": "PvP cooldown: {0}s remaining."
+  }
+}

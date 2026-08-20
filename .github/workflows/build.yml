@@ -1,0 +1,92 @@
+name: Build All Plugins
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - "TurretControl/**"
+      - "PvPCooldowns/**"
+      - "DamageAlerts/**"
+      - ".github/workflows/build.yml"
+
+jobs:
+  build:
+    name: Build Release x64
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Checkout ArkApi 3.56 SDK (shared by all plugins)
+        shell: pwsh
+        run: |
+          git clone https://github.com/ArkServerApi/AseApi.git "$env:GITHUB_WORKSPACE\AseApi"
+          Set-Location "$env:GITHUB_WORKSPACE\AseApi"
+          git checkout f13b85979254b6b19c8d9255a0fc11c128978b8b
+          "ARKAPI_ROOT=$env:GITHUB_WORKSPACE\AseApi" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify ArkApi 3.56
+        shell: pwsh
+        run: |
+          $apiFile = Join-Path $env:ARKAPI_ROOT "version\Core\Private\Ark\ArkBaseApi.cpp"
+          if (!(Test-Path $apiFile)) { throw "ArkApi source file not found: $apiFile" }
+          $content = Get-Content $apiFile -Raw
+          if ($content -notmatch 'api_version\s*=\s*3\.56f') { throw "Checked-out AseApi revision is not ArkApi 3.56" }
+          $lib = Join-Path $env:ARKAPI_ROOT "out_lib\ArkApi.lib"
+          if (!(Test-Path $lib)) { throw "ArkApi.lib not found: $lib" }
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build TurretControl
+        shell: pwsh
+        run: |
+          msbuild "$env:GITHUB_WORKSPACE\TurretControl\TurretControl.sln" `
+            /m /p:Configuration=Release /p:Platform=x64 /p:ARKAPI_ROOT="$env:ARKAPI_ROOT"
+
+      - name: Build PvPCooldowns
+        shell: pwsh
+        run: |
+          msbuild "$env:GITHUB_WORKSPACE\PvPCooldowns\PvPCooldowns.sln" `
+            /m /p:Configuration=Release /p:Platform=x64 /p:ARKAPI_ROOT="$env:ARKAPI_ROOT"
+
+      - name: Build DamageAlerts
+        shell: pwsh
+        run: |
+          msbuild "$env:GITHUB_WORKSPACE\DamageAlerts\DamageAlerts.sln" `
+            /m /p:Configuration=Release /p:Platform=x64 /p:ARKAPI_ROOT="$env:ARKAPI_ROOT"
+
+      - name: Collect plugin artifacts
+        shell: pwsh
+        run: |
+          $names = @("TurretControl", "PvPCooldowns", "DamageAlerts")
+          foreach ($name in $names) {
+            $out = "$env:GITHUB_WORKSPACE\artifact\$name"
+            New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+            $dllCandidates = @(
+              "$env:GITHUB_WORKSPACE\$name\dist\$name\$name.dll",
+              "$env:GITHUB_WORKSPACE\$name\x64\Release\$name.dll",
+              "$env:GITHUB_WORKSPACE\$name\$name\x64\Release\$name.dll"
+            )
+            $dll = $dllCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (!$dll) {
+              $dll = Get-ChildItem -Path "$env:GITHUB_WORKSPACE\$name" -Filter "$name.dll" -Recurse |
+                Select-Object -First 1 -ExpandProperty FullName
+            }
+            if (!$dll) { throw "$name.dll was not produced" }
+
+            Copy-Item $dll "$out\$name.dll" -Force
+            Copy-Item "$env:GITHUB_WORKSPACE\$name\Plugin\config.json" "$out\config.json" -Force
+            Copy-Item "$env:GITHUB_WORKSPACE\$name\Plugin\PluginInfo.json" "$out\PluginInfo.json" -Force
+          }
+
+      - name: Upload all plugins
+        uses: actions/upload-artifact@v4
+        with:
+          name: AllPlugins-Release-x64
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30

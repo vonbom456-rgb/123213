@@ -1,0 +1,7 @@
+{
+  "FullName": "DamageAlerts",
+  "Description": "Colored chat damage feedback: green for damage you deal, red for enemy-tribe damage to your structures/dinos/players",
+  "Version": 1.2,
+  "MinApiVersion": 3.56,
+  "Dependencies": []
+}

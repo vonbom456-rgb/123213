@@ -1,0 +1,7 @@
+{
+  "FullName": "TurretControl",
+  "Description": "Stack-mod aware turret fill, mass turret controls and server-side ammo caps for ARK: Survival Evolved",
+  "Version": 1.3,
+  "MinApiVersion": 3.56,
+  "Dependencies": []
+}

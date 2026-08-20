@@ -1,0 +1,60 @@
+{
+  "General": {
+    "FillCommand": "/fill",
+    "TurretsCommand": "/turrets",
+    "FillRadius": 3000,
+    "HeavyAmmoLimit": 10000,
+    "TekAmmoLimit": 5000,
+    "AutoTurretAmmoLimit": 10000,
+    "RequireSameTribe": true,
+    "AllowDuringPvpCooldown": false,
+    "ShowMessages": true,
+    "HardCapEnabled": true,
+    "HardCapIntervalSeconds": 2,
+    "HardCapScanRadius": 5000,
+    "InventoryCapEnabled": true
+  },
+  "Permissions": {
+    "UsePermissions": false,
+    "DefaultPermission": "TurretControl.Default"
+  },
+  "FillRadiusHologram": {
+    "Enabled": false,
+    "BlueprintPath": "",
+    "SpawnDistance": 0,
+    "SpawnYOffset": 0,
+    "SpawnZOffset": 0
+  },
+  "Turrets": {
+    "VanillaHeavy": true,
+    "VanillaTek": true,
+    "VanillaAuto": true,
+    "CustomHeavyClasses": [],
+    "CustomTekClasses": [],
+    "CustomAutoClasses": []
+  },
+  "RangeValues": {
+    "Low": 0,
+    "Medium": 1,
+    "High": 2
+  },
+  "TargetingValues": {
+    "PlayersOnly": -1,
+    "PlayersAndTames": -1
+  },
+  "Messages": {
+    "Sender": "TurretControl",
+    "NoPermission": "You do not have permission.",
+    "NoTurrets": "No valid turrets found.",
+    "NoAmmo": "No suitable ammunition found.",
+    "AlreadyFull": "All valid turrets are already at their configured ammo limit.",
+    "FillSuccess": "Filled {0} turrets | ARB used: {1} | Shards used: {2}",
+    "TurretSuccess": "Updated {0} turrets.",
+    "TargetingUnconfigured": "Targeting command is disabled until TargetingValues are configured.",
+    "PvpBlocked": "You cannot use /fill during PvP cooldown.",
+    "ReloadOk": "TurretControl config reloaded.",
+    "ReloadFailed": "TurretControl config reload failed.",
+    "FillFailed": "Fill failed. Check ArkApi log for TurretControl details.",
+    "HardCapRefund": "Turret ammo cap enforced: {0} overflow ammo returned to your inventory."
+  }
+}
