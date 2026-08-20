@@ -1,12 +1,13 @@
-# DamageNumbers 1.6 — RedEnemyNumbers
+# DamageNumbers 1.7 — DirectHitNumbers
 
 Native ARK floating damage numbers for the player dealing damage. When a
 different player-owned tribe attacks, the victim tribe also receives native
 enemy-coloured floating numbers at the damaged target and a red text warning.
 PvPCooldowns separately handles the persistent raid timer.
 
-Version 1.3 forces ARK's own server-side floating-damage setting. Use
-`/datest` in chat to send a `12345` test number and show live hook counters.
+Version 1.7 explicitly sends the native floating-number RPC for real hits.
+Use `/datest` in chat to place a `12345` test number in front of the camera
+and show live hook counters.
 
 Hooks `APrimalCharacter.TakeDamage` and `APrimalStructure.TakeDamage` (the
 standard ASE damage hook points, same as DamageAlerts' sibling plugins) and
@@ -27,7 +28,7 @@ so rapid hits (turret fire, DoT) become one line, not spam.
   },
   "FloatingDamage": {
     "Enabled": true,
-    "ForceNativeServerSetting": true,
+    "ForceNativeServerSetting": false,
     "ShowEnemyDamageToVictimTribe": true,
     "AlsoSendAttackerChat": false,
     "VerticalOffset": 100.0
@@ -61,9 +62,9 @@ so rapid hits (turret fire, DoT) become one line, not spam.
   (структура/живность/игрок).
 
 Floating numbers are emitted per hit, like the screenshot. Chat alerts remain
-aggregated by `FlushIntervalSeconds`. If the server already has
-`ShowFloatingDamageText=true`, disable one of the two mechanisms to avoid
-seeing duplicate numbers.
+aggregated by `FlushIntervalSeconds`. `ForceNativeServerSetting` is kept for
+compatibility, but v1.7 no longer relies on that runtime flag to deliver the
+attacker's number.
 
 ## Build
 

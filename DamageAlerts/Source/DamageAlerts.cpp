@@ -155,9 +155,11 @@ void RecordDamage(AActor* target, AController* event_instigator, AActor* damage_
     const AttackerInfo attacker = ResolveAttacker(event_instigator, damage_causer);
 
     if (g_config.notify_attacker && attacker.player && amount >= g_config.min_damage_to_report) {
-        // When ForceNativeServerSetting is enabled ARK itself emits the
-        // floating number. Sending our RPC too would create duplicate text.
-        if (g_config.floating_damage_enabled && !g_config.force_native_server_setting) {
+        // Always send the native client RPC for the actual attacker. Merely
+        // toggling bShowFloatingDamageText at runtime is not reliably
+        // replicated to already connected ASE clients, so relying on that
+        // setting alone can produce no number at all.
+        if (g_config.floating_damage_enabled) {
             FVector location{};
             FVector extent{};
             target->GetActorBounds(false, &location, &extent);
@@ -327,17 +329,20 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 
     AShooterCharacter* character = pc->GetPlayerCharacter();
     if (character) {
+        // Put the test number in front of the camera. The old test placed it
+        // at the player's own body, which is behind the first-person camera.
         FVector location{};
-        FVector extent{};
-        character->GetActorBounds(false, &location, &extent);
-        location.Z += g_config.floating_damage_vertical_offset;
+        FRotator rotation{};
+        pc->GetPlayerViewPoint(&location, &rotation);
+        location += rotation.Vector() * 600.0f;
+        location.Z += 50.0f;
         const int team = ArkApi::GetApiUtils().GetTribeID(pc);
         pc->ClientAddFloatingDamageText(FVector_NetQuantize(location), 12345, team);
         ++g_floating_rpc_events;
     }
 
     std::ostringstream status;
-    status << "DamageNumbers v1.6 RedEnemyNumbers OK | native="
+    status << "DamageNumbers v1.7 DirectHitNumbers OK | native="
            << (g_native_floating_applied ? "ON" : "WAIT")
            << " | character_hits=" << g_character_damage_events
            << " | structure_hits=" << g_structure_damage_events
@@ -349,7 +354,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 
 void Load() {
     Log::Get().Init("DamageNumbers");
-    Log::GetLog()->info("Loading plugin - DamageNumbers v1.6 RedEnemyNumbers");
+    Log::GetLog()->info("Loading plugin - DamageNumbers v1.7 DirectHitNumbers");
 
     try {
         DamageAlerts::ReadConfig();
