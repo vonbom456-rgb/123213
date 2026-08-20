@@ -1,8 +1,7 @@
-# DamageAlerts 1.3
+# DamageAlerts 1.4 — PureDamager
 
-Native ARK floating damage numbers, plus a **red**
-chat alert to a tribe's online members when their structure/dino/player takes
-damage from a different tribe. No client mod is required for the numbers.
+Native ARK floating damage numbers for the player dealing damage. Raid state
+and raid warnings are handled only by PvPCooldowns. No client mod is required.
 
 Version 1.3 forces ARK's own server-side floating-damage setting. Use
 `/datest` in chat to send a `12345` test number and show live hook counters.
@@ -21,7 +20,7 @@ so rapid hits (turret fire, DoT) become one line, not spam.
     "MinDamageToReport": 1.0,
     "FlushIntervalSeconds": 1,
     "NotifyAttacker": true,
-    "NotifyVictimTribeOnEnemyHit": true,
+    "NotifyVictimTribeOnEnemyHit": false,
     "MinTribeTeamId": 50000
   },
   "FloatingDamage": {
@@ -48,9 +47,8 @@ so rapid hits (turret fire, DoT) become one line, not spam.
   chat line (disabled by default to avoid duplicate feedback).
 - `FloatingDamage.VerticalOffset` — moves the number upward from the target's
   root position, in Unreal units.
-- `NotifyVictimTribeOnEnemyHit` — red message to every online member of the
-  tribe that got hit, only when the attacker belongs to a *different* tribe
-  (wild-dino damage, self-damage, and same-tribe damage never trigger this).
+- `NotifyVictimTribeOnEnemyHit` remains available for compatibility but is
+  disabled by default; PvPCooldowns owns all raid notifications.
 - `MinTribeTeamId` — lower boundary for player-owned teams; wild dinos are
   additionally rejected through `BPIsTamed()`.
 - `{0}` = summed damage (rounded), `{1}` = target category

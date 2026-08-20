@@ -1,8 +1,6 @@
-// DamageAlerts -- native floating damage plus colored tribe alerts:
-//   - ARK's native floating damage number to the attacking player.
-//   - RED to the online members of the victim's own tribe, when the damage
-//     came from a *different* tribe (structure/dino/player of theirs took
-//     enemy damage).
+// DamageAlerts -- a focused damage-number plugin. ARK's native floating
+// number is shown to the attacking player for every hit that actually deals
+// damage. Raid state and raid notifications belong to PvPCooldowns.
 //
 // Detection/attribution reuses the same verified hooks and fields as
 // TurretControl and PvPCooldowns: APrimalCharacter.TakeDamage and
@@ -42,7 +40,7 @@ struct Config {
     float min_damage_to_report = 1.0f;
     int flush_interval_seconds = 1;
     bool notify_attacker = true;
-    bool notify_victim_tribe = true;
+    bool notify_victim_tribe = false;
     int min_tribe_team_id = 50000;
     bool floating_damage_enabled = true;
     bool force_native_server_setting = true;
@@ -306,7 +304,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
     }
 
     std::ostringstream status;
-    status << "DamageAlerts v1.3 OK | native="
+    status << "DamageAlerts v1.4 PureDamager OK | native="
            << (g_native_floating_applied ? "ON" : "WAIT")
            << " | character_hits=" << g_character_damage_events
            << " | structure_hits=" << g_structure_damage_events
@@ -318,7 +316,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 
 void Load() {
     Log::Get().Init("DamageAlerts");
-    Log::GetLog()->info("Loading plugin - DamageAlerts v1.3 NativeDamage");
+    Log::GetLog()->info("Loading plugin - DamageAlerts v1.4 PureDamager");
 
     try {
         DamageAlerts::ReadConfig();

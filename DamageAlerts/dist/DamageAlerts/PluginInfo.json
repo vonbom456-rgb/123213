@@ -1,7 +1,7 @@
 {
   "FullName": "DamageAlerts",
-  "Description": "Colored chat damage feedback: green for damage you deal, red for enemy-tribe damage to your structures/dinos/players",
-  "Version": 1.3,
+  "Description": "Pure native ARK floating damage numbers for the attacker; raid notifications are handled by PvPCooldowns",
+  "Version": 1.4,
   "MinApiVersion": 3.56,
   "Dependencies": []
 }
