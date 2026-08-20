@@ -1,4 +1,4 @@
-// DamageAlerts -- ARK's native floating damage numbers for the attacker,
+// DamageNumbers -- ARK's native floating damage numbers for the attacker,
 // plus a red warning to the victim tribe only when a real enemy tribe deals
 // damage. PvPCooldowns separately owns the persistent raid timer/state.
 //
@@ -198,7 +198,7 @@ void FlushTimer() {
             game_mode->bShowFloatingDamageTextField() = true;
             if (!g_native_floating_applied) {
                 g_native_floating_applied = true;
-                Log::GetLog()->info("DamageAlerts: native ARK floating damage enabled");
+                Log::GetLog()->info("DamageNumbers: native ARK floating damage enabled");
             }
         }
     }
@@ -283,7 +283,7 @@ float Hook_APrimalStructure_TakeDamage(APrimalStructure* _this, float damage, FD
 // --- Config ---
 
 std::string ConfigPath() {
-    return ArkApi::Tools::GetCurrentDir() + "/ArkApi/Plugins/DamageAlerts/config.json";
+    return ArkApi::Tools::GetCurrentDir() + "/ArkApi/Plugins/DamageNumbers/config.json";
 }
 
 Config ParseConfig(const minijson::Value& root) {
@@ -337,7 +337,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
     }
 
     std::ostringstream status;
-    status << "DamageAlerts v1.5 RedEnemyNumbers OK | native="
+    status << "DamageNumbers v1.6 RedEnemyNumbers OK | native="
            << (g_native_floating_applied ? "ON" : "WAIT")
            << " | character_hits=" << g_character_damage_events
            << " | structure_hits=" << g_structure_damage_events
@@ -348,13 +348,13 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 } // namespace DamageAlerts
 
 void Load() {
-    Log::Get().Init("DamageAlerts");
-    Log::GetLog()->info("Loading plugin - DamageAlerts v1.5 RedEnemyNumbers");
+    Log::Get().Init("DamageNumbers");
+    Log::GetLog()->info("Loading plugin - DamageNumbers v1.6 RedEnemyNumbers");
 
     try {
         DamageAlerts::ReadConfig();
     } catch (const std::exception& e) {
-        Log::GetLog()->error("DamageAlerts: config error ({}), using defaults", e.what());
+        Log::GetLog()->error("DamageNumbers: config error ({}), using defaults", e.what());
         DamageAlerts::g_config = DamageAlerts::Config();
     }
 
@@ -386,21 +386,21 @@ void Unload() {
 extern "C" __declspec(dllexport) void __fastcall Plugin_Init() noexcept {
     try { Load(); }
     catch (const std::exception& e) {
-        Log::Get().Init("DamageAlerts");
-        Log::GetLog()->error("DamageAlerts failed to initialize: {}", e.what());
+        Log::Get().Init("DamageNumbers");
+        Log::GetLog()->error("DamageNumbers failed to initialize: {}", e.what());
     }
     catch (...) {
-        Log::Get().Init("DamageAlerts");
-        Log::GetLog()->error("DamageAlerts failed to initialize with an unknown exception");
+        Log::Get().Init("DamageNumbers");
+        Log::GetLog()->error("DamageNumbers failed to initialize with an unknown exception");
     }
 }
 
 extern "C" __declspec(dllexport) void __fastcall Plugin_Unload() noexcept {
     try { Unload(); }
     catch (const std::exception& e) {
-        Log::GetLog()->error("DamageAlerts unload exception: {}", e.what());
+        Log::GetLog()->error("DamageNumbers unload exception: {}", e.what());
     }
     catch (...) {
-        Log::GetLog()->error("DamageAlerts unload unknown exception");
+        Log::GetLog()->error("DamageNumbers unload unknown exception");
     }
 }

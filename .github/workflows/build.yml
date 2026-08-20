@@ -64,7 +64,7 @@ jobs:
       - name: Collect plugin artifacts
         shell: pwsh
         run: |
-          $names = @("TurretControl", "PvPCooldowns", "DamageAlerts")
+          $names = @("TurretControl", "PvPCooldowns")
           foreach ($name in $names) {
             $out = "$env:GITHUB_WORKSPACE\artifact\$name"
             New-Item -ItemType Directory -Force -Path $out | Out-Null
@@ -86,6 +86,14 @@ jobs:
             Copy-Item "$env:GITHUB_WORKSPACE\$name\Plugin\PluginInfo.json" "$out\PluginInfo.json" -Force
           }
 
+          $damageOut = "$env:GITHUB_WORKSPACE\artifact\DamageNumbers"
+          New-Item -ItemType Directory -Force -Path $damageOut | Out-Null
+          $damageDll = "$env:GITHUB_WORKSPACE\DamageAlerts\dist\DamageNumbers\DamageNumbers.dll"
+          if (!(Test-Path $damageDll)) { throw "DamageNumbers.dll was not produced" }
+          Copy-Item $damageDll "$damageOut\DamageNumbers.dll" -Force
+          Copy-Item "$env:GITHUB_WORKSPACE\DamageAlerts\Plugin\config.json" "$damageOut\config.json" -Force
+          Copy-Item "$env:GITHUB_WORKSPACE\DamageAlerts\Plugin\PluginInfo.json" "$damageOut\PluginInfo.json" -Force
+
       - name: Upload all plugins
         uses: actions/upload-artifact@v4
         with:
@@ -102,6 +110,6 @@ jobs:
           gh release create "plugins-${{ github.run_number }}" `
             "$env:GITHUB_WORKSPACE\AllPlugins-Release-x64.zip" `
             --title "ARK plugins build ${{ github.run_number }}" `
-            --notes "TurretControl, PvPCooldowns and DamageAlerts built for ArkApi 3.56 from commit ${{ github.sha }}."
+            --notes "TurretControl, PvPCooldowns and DamageNumbers built for ArkApi 3.56 from commit ${{ github.sha }}."
         env:
           GH_TOKEN: ${{ github.token }}

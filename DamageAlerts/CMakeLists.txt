@@ -39,9 +39,9 @@ target_include_directories(DamageAlerts PRIVATE
 )
 target_link_libraries(DamageAlerts PRIVATE "${ARKAPI_LIB}")
 
-set(PC_DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dist/DamageAlerts")
+set(PC_DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dist/DamageNumbers")
 set_target_properties(DamageAlerts PROPERTIES
-    OUTPUT_NAME "DamageAlerts"
+    OUTPUT_NAME "DamageNumbers"
     RUNTIME_OUTPUT_DIRECTORY "${PC_DIST_DIR}"
     RUNTIME_OUTPUT_DIRECTORY_DEBUG "${PC_DIST_DIR}"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${PC_DIST_DIR}"
@@ -58,8 +58,8 @@ endif()
 add_custom_command(TARGET DamageAlerts POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/Plugin/config.json"
-        "${CMAKE_CURRENT_SOURCE_DIR}/dist/DamageAlerts/config.json"
+        "${CMAKE_CURRENT_SOURCE_DIR}/dist/DamageNumbers/config.json"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/Plugin/PluginInfo.json"
-        "${CMAKE_CURRENT_SOURCE_DIR}/dist/DamageAlerts/PluginInfo.json"
+        "${CMAKE_CURRENT_SOURCE_DIR}/dist/DamageNumbers/PluginInfo.json"
 )

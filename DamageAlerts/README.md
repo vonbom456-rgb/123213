@@ -1,4 +1,4 @@
-# DamageAlerts 1.5 — RedEnemyNumbers
+# DamageNumbers 1.6 — RedEnemyNumbers
 
 Native ARK floating damage numbers for the player dealing damage. When a
 different player-owned tribe attacks, the victim tribe also receives native
@@ -74,7 +74,9 @@ cmake -B build -S . -DARKAPI_ROOT=C:/path/to/AseApi
 cmake --build build --config Release
 ```
 
-Output goes to `dist/DamageAlerts/`.
+Output goes to `dist/DamageNumbers/`. Install it as
+`ArkApi/Plugins/DamageNumbers/DamageNumbers.dll`; the new name deliberately
+avoids old or malformed `DamageAlerts` paths left by hosting panels.
 
 ## Note
 

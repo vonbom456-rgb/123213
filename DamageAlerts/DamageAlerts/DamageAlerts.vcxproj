@@ -53,7 +53,7 @@
   <PropertyGroup>
     <ArkApiRoot Condition="'$(ARKAPI_ROOT)'!=''">$(ARKAPI_ROOT)</ArkApiRoot>
     <ArkApiRoot Condition="'$(ArkApiRoot)'==''">$(SolutionDir)..\AseApi</ArkApiRoot>
-    <TargetName>DamageAlerts</TargetName>
+    <TargetName>DamageNumbers</TargetName>
     <OutDir>$(SolutionDir)build\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)build\obj\$(Configuration)\</IntDir>
   </PropertyGroup>
@@ -101,10 +101,10 @@
       <AdditionalDependencies>ArkApi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>if not exist "$(SolutionDir)dist\DamageAlerts" mkdir "$(SolutionDir)dist\DamageAlerts"
-copy /Y "$(TargetPath)" "$(SolutionDir)dist\DamageAlerts\DamageAlerts.dll"
-copy /Y "$(SolutionDir)Plugin\config.json" "$(SolutionDir)dist\DamageAlerts\config.json"
-copy /Y "$(SolutionDir)Plugin\PluginInfo.json" "$(SolutionDir)dist\DamageAlerts\PluginInfo.json"</Command>
+      <Command>if not exist "$(SolutionDir)dist\DamageNumbers" mkdir "$(SolutionDir)dist\DamageNumbers"
+copy /Y "$(TargetPath)" "$(SolutionDir)dist\DamageNumbers\DamageNumbers.dll"
+copy /Y "$(SolutionDir)Plugin\config.json" "$(SolutionDir)dist\DamageNumbers\config.json"
+copy /Y "$(SolutionDir)Plugin\PluginInfo.json" "$(SolutionDir)dist\DamageNumbers\PluginInfo.json"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
 
