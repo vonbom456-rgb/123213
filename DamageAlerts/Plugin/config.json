@@ -3,7 +3,7 @@
     "MinDamageToReport": 1.0,
     "FlushIntervalSeconds": 1,
     "NotifyAttacker": true,
-    "NotifyVictimTribeOnEnemyHit": false,
+    "NotifyVictimTribeOnEnemyHit": true,
     "MinTribeTeamId": 50000
   },
   "FloatingDamage": {

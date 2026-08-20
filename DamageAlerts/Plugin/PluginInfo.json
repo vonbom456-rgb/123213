@@ -1,6 +1,6 @@
 {
   "FullName": "DamageAlerts",
-  "Description": "Pure native ARK floating damage numbers for the attacker; raid notifications are handled by PvPCooldowns",
+  "Description": "Native damage numbers for the attacker plus a red alert only when an enemy tribe damages the victim tribe",
   "Version": 1.4,
   "MinApiVersion": 3.56,
   "Dependencies": []

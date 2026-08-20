@@ -1,7 +1,8 @@
-# DamageAlerts 1.4 — PureDamager
+# DamageAlerts 1.4 — DamageAndEnemyAlert
 
-Native ARK floating damage numbers for the player dealing damage. Raid state
-and raid warnings are handled only by PvPCooldowns. No client mod is required.
+Native ARK floating damage numbers for the player dealing damage, plus a red
+warning to the victim tribe only for damage from a different player-owned
+tribe. PvPCooldowns separately handles the persistent raid timer.
 
 Version 1.3 forces ARK's own server-side floating-damage setting. Use
 `/datest` in chat to send a `12345` test number and show live hook counters.
@@ -20,7 +21,7 @@ so rapid hits (turret fire, DoT) become one line, not spam.
     "MinDamageToReport": 1.0,
     "FlushIntervalSeconds": 1,
     "NotifyAttacker": true,
-    "NotifyVictimTribeOnEnemyHit": false,
+    "NotifyVictimTribeOnEnemyHit": true,
     "MinTribeTeamId": 50000
   },
   "FloatingDamage": {
@@ -47,8 +48,8 @@ so rapid hits (turret fire, DoT) become one line, not spam.
   chat line (disabled by default to avoid duplicate feedback).
 - `FloatingDamage.VerticalOffset` — moves the number upward from the target's
   root position, in Unreal units.
-- `NotifyVictimTribeOnEnemyHit` remains available for compatibility but is
-  disabled by default; PvPCooldowns owns all raid notifications.
+- `NotifyVictimTribeOnEnemyHit` sends a red warning only when the damage came
+  from a different player-owned tribe; own/friendly/wild damage is ignored.
 - `MinTribeTeamId` — lower boundary for player-owned teams; wild dinos are
   additionally rejected through `BPIsTamed()`.
 - `{0}` = summed damage (rounded), `{1}` = target category
