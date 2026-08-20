@@ -1,24 +1,23 @@
-// PvPCooldowns -- puts a player on a PvP cooldown when they are killed by
-// another tribe (a player, or that tribe's turret/dino), and exposes a
+// PvPCooldowns -- puts both tribes on a PvP/raid cooldown when one tribe
+// damages another tribe's player, tame or structure, and exposes a
 // simple query function so other plugins (e.g. TurretControl) can block
 // their own commands while a player is on cooldown.
 //
-// Detection: hooks APrimalCharacter.TakeDamage (the standard, widely-used
-// ASE hook point for player/dino damage -- confirmed against public ArkApi
-// 3.56 plugin examples) and checks whether the target went from alive to
-// dead across that single call. Attribution uses AActor::TargetingTeamField,
-// a base-AActor field (not turret-specific) that ARK sets on players,
-// dinos, structures and their projectiles alike, so it covers "a player of
-// another tribe killed me" and "that tribe's turret killed me" with the
-// same check, without needing to special-case turrets vs. weapons.
+// Detection: hooks character and structure TakeDamage, then starts or extends
+// the tag after real enemy damage is applied. Attribution prefers the player
+// controller, handles tamed dino instigators explicitly and otherwise falls
+// back to the damage causer's player-team id. Wild/environment/friendly damage
+// is rejected.
 //
 // See SOURCE_VERIFICATION.md for exactly which functions this relies on.
 
 #include <API/ARK/Ark.h>
 #include <Windows.h>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -30,21 +29,29 @@ namespace PvPCooldowns {
 
 struct Config {
     int cooldown_seconds = 45;
+    float min_damage_to_trigger = 1.0f;
     bool show_messages = true;
     std::string self_check_command = "/pvpcd";
-    int reminder_interval_seconds = 15; // 0 disables periodic reminders
+    std::string test_command = "/pvpcdtest";
+    std::string icon_test_command = "/pvpcdicon";
+    int reminder_interval_seconds = 5; // 0 disables periodic reminders
     int min_tribe_team_id = 50000;
+
+    bool hud_notification_enabled = true;
+    float hud_display_scale = 1.1f;
+    float hud_display_time = 4.0f;
+    std::string hud_icon = "players";
 
     // A real custom icon is game content and therefore must come from a tiny
     // client/server mod.  When this class is present the plugin attaches it to
     // the respawned player and drives ARK's native buff countdown.
-    bool hud_buff_enabled = true;
-    std::string hud_buff_blueprint = "/Game/Mods/PvPCooldowns/Buff_PvPCooldown.Buff_PvPCooldown_C";
+    bool hud_buff_enabled = false;
+    std::string hud_buff_blueprint;
 
-    std::string cooldown_started = "PvP cooldown started: {0}s. Some commands (like /fill) are blocked until it ends.";
-    std::string self_check_on_cooldown = "PvP cooldown: {0}s remaining.";
-    std::string self_check_none = "You are not on PvP cooldown.";
-    std::string reminder = "PvP cooldown: {0}s remaining.";
+    std::string cooldown_started = "RAID / PVP started: {0}s. /fill and protected commands are blocked.";
+    std::string self_check_on_cooldown = "RAID / PVP: {0}s remaining.";
+    std::string self_check_none = "RAID / PVP timer is not active.";
+    std::string reminder = "RAID / PVP: {0}s remaining.";
 };
 
 Config g_config;
@@ -62,6 +69,27 @@ void Send(AShooterPlayerController* pc, const std::string& text) {
     ArkApi::GetApiUtils().SendServerMessage(pc, FColorList::Yellow, *message);
 }
 
+UTexture2D* GetHudIcon(AShooterPlayerController* pc, std::string name) {
+    if (!pc) return nullptr;
+    std::transform(name.begin(), name.end(), name.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (name == "default") return pc->PingIcon_DefaultField();
+    if (name == "dinos") return pc->PingIcon_DinosField();
+    if (name == "structures") return pc->PingIcon_StructuresField();
+    return pc->PingIcon_PlayersField();
+}
+
+void SendHud(AShooterPlayerController* pc, const std::string& text, float display_time = -1.0f,
+             const std::string& icon_name = "") {
+    if (!pc || text.empty() || !g_config.hud_notification_enabled) return;
+    const FString message(ArkApi::Tools::Utf8Decode(text).c_str());
+    UTexture2D* icon = GetHudIcon(pc, icon_name.empty() ? g_config.hud_icon : icon_name);
+    ArkApi::GetApiUtils().SendNotification(
+        pc, FColorList::Red, g_config.hud_display_scale,
+        display_time > 0.0f ? display_time : g_config.hud_display_time,
+        icon, *message);
+}
+
 // steam_id -> cooldown expiry
 std::unordered_map<uint64, std::chrono::steady_clock::time_point> g_cooldowns;
 UClass* g_hud_buff_class = nullptr;
@@ -72,31 +100,40 @@ bool IsPlayerOwnedTeam(int team) {
 
 // Reject a wild dino explicitly. For projectiles/structures, requiring a
 // player-team-range id keeps world/environmental damage out of PvP state.
-int ResolveAttackerTeam(AController* event_instigator, AActor* damage_causer) {
+struct AttackerInfo {
+    int team = -1;
+    AShooterPlayerController* player = nullptr;
+};
+
+AttackerInfo ResolveAttacker(AController* event_instigator, AActor* damage_causer) {
+    AttackerInfo result;
     if (event_instigator) {
         if (event_instigator->IsA(AShooterPlayerController::GetPrivateStaticClass())) {
-            const int team = ArkApi::GetApiUtils().GetTribeID(
-                static_cast<AShooterPlayerController*>(event_instigator));
-            return IsPlayerOwnedTeam(team) ? team : -1;
+            result.player = static_cast<AShooterPlayerController*>(event_instigator);
+            result.team = ArkApi::GetApiUtils().GetTribeID(result.player);
+            if (!IsPlayerOwnedTeam(result.team)) result.team = -1;
+            return result;
         }
 
         ACharacter* instigator_character = event_instigator->CharacterField();
         if (instigator_character &&
             instigator_character->IsA(APrimalDinoCharacter::GetPrivateStaticClass())) {
             auto* dino = static_cast<APrimalDinoCharacter*>(instigator_character);
-            if (!dino->BPIsTamed()) return -1;
-            const int team = dino->TargetingTeamField();
-            return IsPlayerOwnedTeam(team) ? team : -1;
+            if (!dino->BPIsTamed()) return result;
+            result.team = dino->TargetingTeamField();
+            if (!IsPlayerOwnedTeam(result.team)) result.team = -1;
+            return result;
         }
     }
 
     if (damage_causer && damage_causer->IsA(APrimalDinoCharacter::GetPrivateStaticClass())) {
         auto* dino = static_cast<APrimalDinoCharacter*>(damage_causer);
-        if (!dino->BPIsTamed()) return -1;
+        if (!dino->BPIsTamed()) return result;
     }
 
-    const int team = damage_causer ? damage_causer->TargetingTeamField() : -1;
-    return IsPlayerOwnedTeam(team) ? team : -1;
+    result.team = damage_causer ? damage_causer->TargetingTeamField() : -1;
+    if (!IsPlayerOwnedTeam(result.team)) result.team = -1;
+    return result;
 }
 
 void StartCooldown(AShooterPlayerController* pc) {
@@ -104,9 +141,27 @@ void StartCooldown(AShooterPlayerController* pc) {
     const uint64 steam_id = ArkApi::IApiUtils::GetSteamIdFromController(pc);
     if (steam_id == 0) return;
 
-    g_cooldowns[steam_id] = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, g_config.cooldown_seconds));
-    if (g_config.show_messages) {
-        Send(pc, ReplaceToken(g_config.cooldown_started, "{0}", std::to_string(g_config.cooldown_seconds)));
+    const auto now = std::chrono::steady_clock::now();
+    const auto existing = g_cooldowns.find(steam_id);
+    const bool was_active = existing != g_cooldowns.end() && now < existing->second;
+    g_cooldowns[steam_id] = now + std::chrono::seconds(std::max(1, g_config.cooldown_seconds));
+    if (!was_active && g_config.show_messages) {
+        const std::string message = ReplaceToken(
+            g_config.cooldown_started, "{0}", std::to_string(g_config.cooldown_seconds));
+        Send(pc, message);
+        SendHud(pc, message);
+    }
+}
+
+void StartCooldownForTribe(int team) {
+    if (!IsPlayerOwnedTeam(team)) return;
+    UWorld* world = ArkApi::GetApiUtils().GetWorld();
+    if (!world) return;
+    for (TWeakObjectPtr<APlayerController> weak_pc : world->PlayerControllerListField()) {
+        auto* base_pc = weak_pc.Get();
+        if (!base_pc || !base_pc->IsA(AShooterPlayerController::GetPrivateStaticClass())) continue;
+        auto* pc = static_cast<AShooterPlayerController*>(base_pc);
+        if (ArkApi::GetApiUtils().GetTribeID(pc) == team) StartCooldown(pc);
     }
 }
 
@@ -130,9 +185,7 @@ bool IsOnCooldown(AShooterPlayerController* pc) { return RemainingSeconds(pc) > 
 std::chrono::steady_clock::time_point g_next_reminder{};
 
 // Periodically re-sends the remaining time to everyone currently on
-// cooldown, so it stays visible in chat rather than only appearing once
-// when the cooldown started. This is a plain chat message, not an on-screen
-// HUD/buff icon -- see README for why a native buff icon isn't included.
+// cooldown, so both chat and the native HUD notification show the countdown.
 void SendReminders(const std::chrono::steady_clock::time_point& now) {
     if (g_config.reminder_interval_seconds <= 0) return;
     if (now < g_next_reminder) return;
@@ -149,46 +202,49 @@ void SendReminders(const std::chrono::steady_clock::time_point& now) {
 
         const int remaining = RemainingSeconds(pc);
         if (remaining > 0) {
-            Send(pc, ReplaceToken(g_config.reminder, "{0}", std::to_string(remaining)));
+            const std::string message = ReplaceToken(g_config.reminder, "{0}", std::to_string(remaining));
+            Send(pc, message);
+            SendHud(pc, message);
         }
     }
 }
 
-// --- Kill detection -----------------------------------------------------
+// --- Enemy damage / raid detection --------------------------------------
 
 DECLARE_HOOK(APrimalCharacter_TakeDamage, float, APrimalCharacter*, float, FDamageEvent*, AController*, AActor*);
+DECLARE_HOOK(APrimalStructure_TakeDamage, float, APrimalStructure*, float, FDamageEvent*, AController*, AActor*);
 
-void HandlePossibleKill(AShooterPlayerController* victim_pc, int victim_team,
-                        AController* event_instigator, AActor* damage_causer) {
-    if (!victim_pc) return;
+void HandleEnemyDamage(int victim_team, AController* event_instigator, AActor* damage_causer, float applied_damage) {
+    if (applied_damage < g_config.min_damage_to_trigger || !IsPlayerOwnedTeam(victim_team)) return;
+    const AttackerInfo attacker = ResolveAttacker(event_instigator, damage_causer);
+    if (!IsPlayerOwnedTeam(attacker.team) || attacker.team == victim_team) return;
 
-    const int killer_team = ResolveAttackerTeam(event_instigator, damage_causer);
-    if (!IsPlayerOwnedTeam(killer_team)) return;
-    if (killer_team == victim_team) return;  // friendly fire / self-damage -- no cooldown
-
-    StartCooldown(victim_pc);
+    // Tag every online member of both tribes. This makes structure/turret
+    // raids work even when the actual damage causer has no player controller.
+    StartCooldownForTribe(victim_team);
+    StartCooldownForTribe(attacker.team);
+    if (attacker.player) StartCooldown(attacker.player);
 }
 
 float Hook_APrimalCharacter_TakeDamage(APrimalCharacter* _this, float damage, FDamageEvent* damage_event,
                                         AController* event_instigator, AActor* damage_causer) {
-    const bool was_dead_before = _this && _this->IsDead();
-    AShooterPlayerController* victim_pc = nullptr;
-    int victim_team = -1;
-
-    // ArkApi's FindControllerFromCharacter deliberately refuses dead
-    // characters. Capture both values before the original damage call.
-    if (!was_dead_before && _this && _this->IsA(AShooterCharacter::GetPrivateStaticClass())) {
-        victim_pc = ArkApi::GetApiUtils().FindControllerFromCharacter(
-            static_cast<AShooterCharacter*>(_this));
-        victim_team = _this->TargetingTeamField();
-    }
+    const int victim_team = _this ? _this->TargetingTeamField() : -1;
 
     const float result =
         APrimalCharacter_TakeDamage_original(_this, damage, damage_event, event_instigator, damage_causer);
 
-    if (!was_dead_before && _this && _this->IsDead()) {
-        HandlePossibleKill(victim_pc, victim_team, event_instigator, damage_causer);
-    }
+    HandleEnemyDamage(victim_team, event_instigator, damage_causer, result);
+
+    return result;
+}
+
+float Hook_APrimalStructure_TakeDamage(APrimalStructure* _this, float damage, FDamageEvent* damage_event,
+                                        AController* event_instigator, AActor* damage_causer) {
+    const int victim_team = _this ? _this->TargetingTeamField() : -1;
+    const float result =
+        APrimalStructure_TakeDamage_original(_this, damage, damage_event, event_instigator, damage_causer);
+
+    HandleEnemyDamage(victim_team, event_instigator, damage_causer, result);
 
     return result;
 }
@@ -314,6 +370,28 @@ void SelfCheckCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Typ
         : g_config.self_check_none);
 }
 
+void TestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type) {
+    if (!pc) return;
+    StartCooldown(pc);
+    Send(pc, "PvPCooldowns v1.2 test started. Use /pvpcd to inspect the timer.");
+}
+
+void IconTestCommand(AShooterPlayerController* pc, FString* message, EChatSendMode::Type) {
+    if (!pc || !message) return;
+    std::istringstream input(message->ToString());
+    std::string command;
+    std::string icon;
+    input >> command >> icon;
+    std::transform(icon.begin(), icon.end(), icon.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (icon != "default" && icon != "players" && icon != "dinos" && icon != "structures") {
+        Send(pc, "Usage: /pvpcdicon default|players|dinos|structures");
+        return;
+    }
+    SendHud(pc, "RAID / PVP icon preview: " + icon, 8.0f, icon);
+    Send(pc, "Showing built-in ARK icon: " + icon);
+}
+
 // --- Config ---
 
 std::string ConfigPath() {
@@ -323,10 +401,17 @@ std::string ConfigPath() {
 Config ParseConfig(const minijson::Value& root) {
     Config c;
     c.cooldown_seconds = minijson::integer(root, "General", "CooldownSeconds", c.cooldown_seconds);
+    c.min_damage_to_trigger = minijson::number(root, "General", "MinDamageToTrigger", c.min_damage_to_trigger);
     c.show_messages = minijson::boolean(root, "General", "ShowMessages", c.show_messages);
     c.self_check_command = minijson::str(root, "General", "SelfCheckCommand", c.self_check_command);
+    c.test_command = minijson::str(root, "General", "TestCommand", c.test_command);
+    c.icon_test_command = minijson::str(root, "General", "IconTestCommand", c.icon_test_command);
     c.reminder_interval_seconds = minijson::integer(root, "General", "ReminderIntervalSeconds", c.reminder_interval_seconds);
     c.min_tribe_team_id = minijson::integer(root, "General", "MinTribeTeamId", c.min_tribe_team_id);
+    c.hud_notification_enabled = minijson::boolean(root, "HudNotification", "Enabled", c.hud_notification_enabled);
+    c.hud_display_scale = minijson::number(root, "HudNotification", "DisplayScale", c.hud_display_scale);
+    c.hud_display_time = minijson::number(root, "HudNotification", "DisplayTime", c.hud_display_time);
+    c.hud_icon = minijson::str(root, "HudNotification", "Icon", c.hud_icon);
     c.hud_buff_enabled = minijson::boolean(root, "HudBuff", "Enabled", c.hud_buff_enabled);
     c.hud_buff_blueprint = minijson::str(root, "HudBuff", "BlueprintPath", c.hud_buff_blueprint);
 
@@ -336,6 +421,7 @@ Config ParseConfig(const minijson::Value& root) {
     c.reminder = minijson::str(root, "Messages", "Reminder", c.reminder);
 
     c.cooldown_seconds = std::max(1, c.cooldown_seconds);
+    c.min_damage_to_trigger = std::max(0.0f, c.min_damage_to_trigger);
     c.min_tribe_team_id = std::max(1, c.min_tribe_team_id);
     return c;
 }
@@ -354,7 +440,7 @@ void ReadConfig() {
 
 void Load() {
     Log::Get().Init("PvPCooldowns");
-    Log::GetLog()->info("Loading plugin - PvPCooldowns v1.1");
+    Log::GetLog()->info("Loading plugin - PvPCooldowns v1.2 RaidCombat");
 
     try {
         PvPCooldowns::ReadConfig();
@@ -367,11 +453,24 @@ void Load() {
     ArkApi::GetHooks().SetHook("APrimalCharacter.TakeDamage",
         &PvPCooldowns::Hook_APrimalCharacter_TakeDamage,
         &PvPCooldowns::APrimalCharacter_TakeDamage_original);
+    ArkApi::GetHooks().SetHook("APrimalStructure.TakeDamage",
+        &PvPCooldowns::Hook_APrimalStructure_TakeDamage,
+        &PvPCooldowns::APrimalStructure_TakeDamage_original);
 
     if (!PvPCooldowns::g_config.self_check_command.empty()) {
         ArkApi::GetCommands().AddChatCommand(
             FString(PvPCooldowns::g_config.self_check_command.c_str()),
             &PvPCooldowns::SelfCheckCommand);
+    }
+    if (!PvPCooldowns::g_config.test_command.empty()) {
+        ArkApi::GetCommands().AddChatCommand(
+            FString(PvPCooldowns::g_config.test_command.c_str()),
+            &PvPCooldowns::TestCommand);
+    }
+    if (!PvPCooldowns::g_config.icon_test_command.empty()) {
+        ArkApi::GetCommands().AddChatCommand(
+            FString(PvPCooldowns::g_config.icon_test_command.c_str()),
+            &PvPCooldowns::IconTestCommand);
     }
 
     PvPCooldowns::TryWireTurretControl(); // in case TurretControl already loaded first
@@ -384,7 +483,14 @@ void Unload() {
     if (!PvPCooldowns::g_config.self_check_command.empty()) {
         ArkApi::GetCommands().RemoveChatCommand(FString(PvPCooldowns::g_config.self_check_command.c_str()));
     }
+    if (!PvPCooldowns::g_config.test_command.empty()) {
+        ArkApi::GetCommands().RemoveChatCommand(FString(PvPCooldowns::g_config.test_command.c_str()));
+    }
+    if (!PvPCooldowns::g_config.icon_test_command.empty()) {
+        ArkApi::GetCommands().RemoveChatCommand(FString(PvPCooldowns::g_config.icon_test_command.c_str()));
+    }
     ArkApi::GetHooks().DisableHook("APrimalCharacter.TakeDamage", &PvPCooldowns::Hook_APrimalCharacter_TakeDamage);
+    ArkApi::GetHooks().DisableHook("APrimalStructure.TakeDamage", &PvPCooldowns::Hook_APrimalStructure_TakeDamage);
     PvPCooldowns::g_hud_buff_class = nullptr;
     PvPCooldowns::g_cooldowns.clear();
 }

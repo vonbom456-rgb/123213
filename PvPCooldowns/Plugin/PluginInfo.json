@@ -1,7 +1,7 @@
 {
   "FullName": "PvPCooldowns",
-  "Description": "Puts a player on a PvP cooldown when they are killed by another tribe (a player or their turret), so other plugins can block commands during it",
-  "Version": 1.1,
+  "Description": "Tags both tribes on enemy damage to players, tames or structures; shows a native HUD timer and lets other plugins block commands",
+  "Version": 1.2,
   "MinApiVersion": 3.56,
   "Dependencies": []
 }

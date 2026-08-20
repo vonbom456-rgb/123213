@@ -45,14 +45,20 @@ struct Config {
     bool notify_victim_tribe = true;
     int min_tribe_team_id = 50000;
     bool floating_damage_enabled = true;
+    bool force_native_server_setting = true;
     bool also_send_attacker_chat = false;
     float floating_damage_vertical_offset = 100.0f;
+    std::string test_command = "/datest";
 
     std::string attacker_hit = "+{0} урона по {1}";
     std::string victim_hit = "-{0} урона по {1} (враг)";
 };
 
 Config g_config;
+uint64 g_character_damage_events = 0;
+uint64 g_structure_damage_events = 0;
+uint64 g_floating_rpc_events = 0;
+bool g_native_floating_applied = false;
 
 std::string ReplaceToken(std::string text, const std::string& token, const std::string& value) {
     const size_t pos = text.find(token);
@@ -124,7 +130,9 @@ void RecordDamage(AActor* target, AController* event_instigator, AActor* damage_
     const AttackerInfo attacker = ResolveAttacker(event_instigator, damage_causer);
 
     if (g_config.notify_attacker && attacker.player && amount >= g_config.min_damage_to_report) {
-        if (g_config.floating_damage_enabled) {
+        // When ForceNativeServerSetting is enabled ARK itself emits the
+        // floating number. Sending our RPC too would create duplicate text.
+        if (g_config.floating_damage_enabled && !g_config.force_native_server_setting) {
             FVector location{};
             FVector extent{};
             target->GetActorBounds(false, &location, &extent);
@@ -135,6 +143,7 @@ void RecordDamage(AActor* target, AController* event_instigator, AActor* damage_
             // needs no client mod: ARK itself renders and colours the number.
             attacker.player->ClientAddFloatingDamageText(
                 FVector_NetQuantize(location), displayed_damage, attacker.team);
+            ++g_floating_rpc_events;
         }
 
         if (g_config.also_send_attacker_chat) {
@@ -154,6 +163,17 @@ void RecordDamage(AActor* target, AController* event_instigator, AActor* damage_
 std::chrono::steady_clock::time_point g_next_flush{};
 
 void FlushTimer() {
+    if (g_config.floating_damage_enabled && g_config.force_native_server_setting) {
+        AShooterGameMode* game_mode = ArkApi::GetApiUtils().GetShooterGameMode();
+        if (game_mode) {
+            game_mode->bShowFloatingDamageTextField() = true;
+            if (!g_native_floating_applied) {
+                g_native_floating_applied = true;
+                Log::GetLog()->info("DamageAlerts: native ARK floating damage enabled");
+            }
+        }
+    }
+
     const auto now = std::chrono::steady_clock::now();
     if (now < g_next_flush) return;
     g_next_flush = now + std::chrono::seconds(std::max(1, g_config.flush_interval_seconds));
@@ -212,6 +232,7 @@ float Hook_APrimalCharacter_TakeDamage(APrimalCharacter* _this, float damage, FD
         APrimalCharacter_TakeDamage_original(_this, damage, damage_event, event_instigator, damage_causer);
 
     if (result > 0.f && _this) {
+        ++g_character_damage_events;
         const Category cat = _this->IsA(AShooterCharacter::GetPrivateStaticClass()) ? Category::Player : Category::Dino;
         RecordDamage(_this, event_instigator, damage_causer, result, cat);
     }
@@ -224,6 +245,7 @@ float Hook_APrimalStructure_TakeDamage(APrimalStructure* _this, float damage, FD
         APrimalStructure_TakeDamage_original(_this, damage, damage_event, event_instigator, damage_causer);
 
     if (result > 0.f && _this) {
+        ++g_structure_damage_events;
         RecordDamage(_this, event_instigator, damage_causer, result, Category::Structure);
     }
     return result;
@@ -244,9 +266,12 @@ Config ParseConfig(const minijson::Value& root) {
     c.min_tribe_team_id = minijson::integer(root, "General", "MinTribeTeamId", c.min_tribe_team_id);
 
     c.floating_damage_enabled = minijson::boolean(root, "FloatingDamage", "Enabled", c.floating_damage_enabled);
+    c.force_native_server_setting = minijson::boolean(
+        root, "FloatingDamage", "ForceNativeServerSetting", c.force_native_server_setting);
     c.also_send_attacker_chat = minijson::boolean(root, "FloatingDamage", "AlsoSendAttackerChat", c.also_send_attacker_chat);
     c.floating_damage_vertical_offset = minijson::number(
         root, "FloatingDamage", "VerticalOffset", c.floating_damage_vertical_offset);
+    c.test_command = minijson::str(root, "Diagnostics", "TestCommand", c.test_command);
 
     c.attacker_hit = minijson::str(root, "Messages", "AttackerHit", c.attacker_hit);
     c.victim_hit = minijson::str(root, "Messages", "VictimHit", c.victim_hit);
@@ -266,11 +291,34 @@ void ReadConfig() {
     g_config = ParseConfig(root);
 }
 
+void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type) {
+    if (!pc) return;
+
+    AShooterCharacter* character = pc->GetPlayerCharacter();
+    if (character) {
+        FVector location{};
+        FVector extent{};
+        character->GetActorBounds(false, &location, &extent);
+        location.Z += g_config.floating_damage_vertical_offset;
+        const int team = ArkApi::GetApiUtils().GetTribeID(pc);
+        pc->ClientAddFloatingDamageText(FVector_NetQuantize(location), 12345, team);
+        ++g_floating_rpc_events;
+    }
+
+    std::ostringstream status;
+    status << "DamageAlerts v1.3 OK | native="
+           << (g_native_floating_applied ? "ON" : "WAIT")
+           << " | character_hits=" << g_character_damage_events
+           << " | structure_hits=" << g_structure_damage_events
+           << " | rpc=" << g_floating_rpc_events;
+    SendColored(pc, status.str(), FColorList::Cyan);
+}
+
 } // namespace DamageAlerts
 
 void Load() {
     Log::Get().Init("DamageAlerts");
-    Log::GetLog()->info("Loading plugin - DamageAlerts v1.2");
+    Log::GetLog()->info("Loading plugin - DamageAlerts v1.3 NativeDamage");
 
     try {
         DamageAlerts::ReadConfig();
@@ -287,12 +335,21 @@ void Load() {
         &DamageAlerts::APrimalStructure_TakeDamage_original);
 
     ArkApi::GetCommands().AddOnTimerCallback("DamageAlerts.Flush", &DamageAlerts::FlushTimer);
+    if (!DamageAlerts::g_config.test_command.empty()) {
+        ArkApi::GetCommands().AddChatCommand(
+            FString(DamageAlerts::g_config.test_command.c_str()), &DamageAlerts::SelfTestCommand);
+    }
 }
 
 void Unload() {
+    if (!DamageAlerts::g_config.test_command.empty()) {
+        ArkApi::GetCommands().RemoveChatCommand(FString(DamageAlerts::g_config.test_command.c_str()));
+    }
     ArkApi::GetCommands().RemoveOnTimerCallback("DamageAlerts.Flush");
     ArkApi::GetHooks().DisableHook("APrimalCharacter.TakeDamage", &DamageAlerts::Hook_APrimalCharacter_TakeDamage);
     ArkApi::GetHooks().DisableHook("APrimalStructure.TakeDamage", &DamageAlerts::Hook_APrimalStructure_TakeDamage);
+    DamageAlerts::g_pending_attacker.clear();
+    DamageAlerts::g_pending_victim.clear();
 }
 
 extern "C" __declspec(dllexport) void __fastcall Plugin_Init() noexcept {

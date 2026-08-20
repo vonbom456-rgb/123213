@@ -1,15 +1,17 @@
-# PvPCooldowns
+# PvPCooldowns 1.2
 
-Puts a player on a PvP cooldown when they're killed by another tribe — a
-player, or that tribe's turret/dino — and lets other plugins (TurretControl,
-or your own) check that cooldown before running their own commands.
+Version 1.2 starts the RAID/PVP timer on real enemy damage to a player,
+tamed dino or structure and tags every online member of both tribes. It uses
+ARK's native on-screen notification with a vanilla icon, so no client mod is
+required. `/pvpcdtest` starts a safe self-test; `/pvpcd` shows the remaining
+time. `/pvpcdicon default|players|dinos|structures` previews every safe icon
+exposed directly by the player controller. A custom PNG buff icon still
+requires a client mod.
 
-## How a kill is detected
-
-Hooks `APrimalCharacter.TakeDamage`, captures the victim controller before
-the lethal call, then checks whether the target changed from alive to dead.
-This ordering matters because ArkApi intentionally does not return a
-controller from `FindControllerFromCharacter` after the character is dead.
+The plugin hooks both `APrimalCharacter.TakeDamage` and
+`APrimalStructure.TakeDamage`. When applied damage crosses tribes, all online
+members of the attacking and defending tribes are tagged. Repeated hits
+extend the expiry without repeating the start message for every bullet.
 
 Attribution accepts enemy players, tamed dinos, structures and their
 projectiles. Wild dinos are explicitly rejected, and `MinTribeTeamId`
@@ -21,24 +23,34 @@ projectiles. Wild dinos are explicitly rejected, and `MinTribeTeamId`
 {
   "General": {
     "CooldownSeconds": 45,
+    "MinDamageToTrigger": 1.0,
     "ShowMessages": true,
     "SelfCheckCommand": "/pvpcd",
-    "ReminderIntervalSeconds": 15,
+    "TestCommand": "/pvpcdtest",
+    "IconTestCommand": "/pvpcdicon",
+    "ReminderIntervalSeconds": 5,
     "MinTribeTeamId": 50000
   },
-  "HudBuff": {
+  "HudNotification": {
     "Enabled": true,
-    "BlueprintPath": "/Game/Mods/PvPCooldowns/Buff_PvPCooldown.Buff_PvPCooldown_C"
+    "DisplayScale": 1.1,
+    "DisplayTime": 4.0,
+    "Icon": "players"
+  },
+  "HudBuff": {
+    "Enabled": false,
+    "BlueprintPath": ""
   }
 }
 ```
 
 `/pvpcd` lets a player check their own remaining cooldown (set
 `SelfCheckCommand` to `""` to disable it). While a cooldown is active, a
-reminder with the remaining time is also re-sent to chat every
-`ReminderIntervalSeconds` (default 15; set to `0` to disable).
+reminder with the remaining time is also re-sent to chat and the native
+on-screen notification every `ReminderIntervalSeconds` (default 5; set to
+`0` to disable).
 
-## Crossed-swords HUD icon and native countdown
+## Optional custom crossed-swords buff icon
 
 ArkApi 3.56 exposes the verified `APrimalBuff::StaticAddBuff` signature. While
 the cooldown is active, the plugin attaches the configured buff to the player
@@ -52,9 +64,10 @@ changes. Set the texture as its HUD icon, cook/install the tiny mod on both
 server and clients, and keep the class path from the shipped config (or change
 `HudBuff.BlueprintPath` to your cooked path).
 
-A server DLL cannot transmit a new texture to unmodded clients. If the class
-is not installed, the plugin logs one warning and safely keeps the chat timer
-and `/pvpcd` fallback instead of calling an invalid asset.
+A server DLL cannot transmit a new texture to unmodded clients. The default
+configuration therefore leaves `HudBuff.Enabled` false and uses the native
+notification with a vanilla icon. Enable the buff only after installing the
+cooked companion mod on server and clients.
 
 ## Blocking other plugins' commands
 
@@ -95,10 +108,10 @@ Output goes to `dist/PvPCooldowns/`. Copy that folder into
 ## Verified against
 
 - `APrimalCharacter.TakeDamage(float, FDamageEvent*, AController*, AActor*) -> float`,
-  `APrimalCharacter::IsDead()`, `APrimalBuff::StaticAddBuff(...)`,
+  `APrimalStructure.TakeDamage(...)`, `APrimalBuff::StaticAddBuff(...)`,
   `APrimalBuff::DeactivateAfterTimeField()` and the native HUD timer flags.
 - `AActor::TargetingTeamField()`, `ArkApi::IApiUtils::GetSteamIdFromController`,
-  `ArkApi::IApiUtils::FindControllerFromCharacter`, `ArkApi::GetApiUtils().GetTribeID`
+  `ArkApi::GetApiUtils().GetTribeID`
   — same source tree as TurretControl (see TurretControl's
   `SOURCE_VERIFICATION.md`).
 

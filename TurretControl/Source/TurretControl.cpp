@@ -35,10 +35,11 @@ struct Config {
     bool require_same_tribe = true;
     bool allow_during_pvp_cooldown = false;
     bool show_messages = true;
-    bool inventory_cap_enabled = true;
-    bool hard_cap_enabled = true;
+    bool inventory_cap_enabled = false;
+    bool hard_cap_enabled = false;
     int hard_cap_interval_seconds = 2;
     float hard_cap_scan_radius = 5000.0f;
+    int startup_delay_seconds = 60;
 
     bool use_permissions = false;
     std::string permission = "TurretControl.Default";
@@ -788,11 +789,33 @@ bool Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity(
     return allowed > 0;
 }
 
+bool g_inventory_hook_installed = false;
+
+void ApplyInventoryHookState() {
+    if (g_config.inventory_cap_enabled && !g_inventory_hook_installed) {
+        g_inventory_hook_installed = ArkApi::GetHooks().SetHook(
+            "UPrimalInventoryComponent.AllowAddInventoryItem_MaxQuantity",
+            &Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity,
+            &UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity_original);
+        if (!g_inventory_hook_installed) {
+            Log::GetLog()->error("TurretControl: inventory-cap hook installation failed; continuing without InventoryCap");
+        }
+    } else if (!g_config.inventory_cap_enabled && g_inventory_hook_installed) {
+        ArkApi::GetHooks().DisableHook(
+            "UPrimalInventoryComponent.AllowAddInventoryItem_MaxQuantity",
+            &Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity);
+        g_inventory_hook_installed = false;
+    }
+}
+
 
 std::chrono::steady_clock::time_point g_next_hard_cap_check = std::chrono::steady_clock::now();
+std::chrono::steady_clock::time_point g_runtime_enable_at{};
+bool g_world_ready_seen = false;
+bool g_runtime_ready = false;
 
 void HardCapTimer() {
-    if (!g_config.hard_cap_enabled) return;
+    if (!g_runtime_ready || !g_config.hard_cap_enabled) return;
 
     const auto now = std::chrono::steady_clock::now();
     if (now < g_next_hard_cap_check) return;
@@ -892,6 +915,32 @@ void HardCapTimer() {
     }
 }
 
+void RuntimeTimer() {
+    UWorld* world = ArkApi::GetApiUtils().GetWorld();
+    if (!world || !world->AuthorityGameModeField() || !world->GameStateField()) {
+        g_world_ready_seen = false;
+        g_runtime_ready = false;
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (!g_world_ready_seen) {
+        g_world_ready_seen = true;
+        g_runtime_enable_at = now + std::chrono::seconds(std::max(0, g_config.startup_delay_seconds));
+        return;
+    }
+
+    if (!g_runtime_ready && now >= g_runtime_enable_at) {
+        g_runtime_ready = true;
+        ApplyInventoryHookState();
+        Log::GetLog()->info(
+            "TurretControl v1.4 runtime enabled after world startup (InventoryCap={}, HardCap={})",
+            g_config.inventory_cap_enabled, g_config.hard_cap_enabled);
+    }
+
+    if (g_runtime_ready) HardCapTimer();
+}
+
 
 UClass* LoadTurretStructureClass(const std::string& path) {
     if (path.empty()) return nullptr;
@@ -931,6 +980,7 @@ Config ParseConfig(const minijson::Value& root) {
     c.hard_cap_enabled = minijson::boolean(root, "General", "HardCapEnabled", c.hard_cap_enabled);
     c.hard_cap_interval_seconds = minijson::integer(root, "General", "HardCapIntervalSeconds", c.hard_cap_interval_seconds);
     c.hard_cap_scan_radius = minijson::number(root, "General", "HardCapScanRadius", c.hard_cap_scan_radius);
+    c.startup_delay_seconds = minijson::integer(root, "General", "StartupDelaySeconds", c.startup_delay_seconds);
 
     c.use_permissions = minijson::boolean(root, "Permissions", "UsePermissions", c.use_permissions);
     c.permission = minijson::str(root, "Permissions", "DefaultPermission", c.permission);
@@ -974,6 +1024,7 @@ Config ParseConfig(const minijson::Value& root) {
     c.auto_ammo_limit = std::max(0, c.auto_ammo_limit);
     c.hard_cap_interval_seconds = std::max(1, c.hard_cap_interval_seconds);
     c.hard_cap_scan_radius = std::max(1000.0f, c.hard_cap_scan_radius);
+    c.startup_delay_seconds = std::max(0, c.startup_delay_seconds);
     return c;
 }
 
@@ -1024,6 +1075,7 @@ void ReloadCommand(APlayerController* player_controller, FString*, bool) {
         const std::string old_turrets = g_registered_turrets_command;
         ReadConfig();
         LoadCustomClasses();
+        if (g_runtime_ready) ApplyInventoryHookState();
         if (g_config.fill_command != old_fill || g_config.turrets_command != old_turrets) {
             UnregisterChatCommands();
             RegisterChatCommands();
@@ -1041,20 +1093,23 @@ void Load() {
     ReadConfig();
     LoadCustomClasses();
     RegisterChatCommands();
-    ArkApi::GetHooks().SetHook("UPrimalInventoryComponent.AllowAddInventoryItem_MaxQuantity",
-        &Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity,
-        &UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity_original);
     g_next_hard_cap_check = std::chrono::steady_clock::now();
-    ArkApi::GetCommands().AddOnTimerCallback("TurretControl.HardCap", &HardCapTimer);
+    g_world_ready_seen = false;
+    g_runtime_ready = false;
+    g_inventory_hook_installed = false;
+    ArkApi::GetCommands().AddOnTimerCallback("TurretControl.Runtime", &RuntimeTimer);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.Reload", &ReloadCommand);
-    Log::GetLog()->info("Loaded plugin - TurretControl v1.3 InventoryCap");
+    Log::GetLog()->info("Loaded plugin - TurretControl v1.4 SafeStartup");
 }
 
 void Unload() {
     UnregisterChatCommands();
-    ArkApi::GetHooks().DisableHook("UPrimalInventoryComponent.AllowAddInventoryItem_MaxQuantity",
-        &Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity);
-    ArkApi::GetCommands().RemoveOnTimerCallback("TurretControl.HardCap");
+    if (g_inventory_hook_installed) {
+        ArkApi::GetHooks().DisableHook("UPrimalInventoryComponent.AllowAddInventoryItem_MaxQuantity",
+            &Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity);
+        g_inventory_hook_installed = false;
+    }
+    ArkApi::GetCommands().RemoveOnTimerCallback("TurretControl.Runtime");
     ArkApi::GetCommands().RemoveConsoleCommand("TurretControl.Reload");
     g_pvp_checker = nullptr;
     g_custom_heavy.clear(); g_custom_tek.clear(); g_custom_auto.clear();

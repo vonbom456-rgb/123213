@@ -8,8 +8,12 @@
   },
   "FloatingDamage": {
     "Enabled": true,
+    "ForceNativeServerSetting": true,
     "AlsoSendAttackerChat": false,
     "VerticalOffset": 100.0
+  },
+  "Diagnostics": {
+    "TestCommand": "/datest"
   },
   "Messages": {
     "AttackerHit": "+{0} урона по {1}",

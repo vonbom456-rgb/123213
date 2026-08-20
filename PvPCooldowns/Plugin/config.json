@@ -1,19 +1,28 @@
 {
   "General": {
     "CooldownSeconds": 45,
+    "MinDamageToTrigger": 1.0,
     "ShowMessages": true,
     "SelfCheckCommand": "/pvpcd",
-    "ReminderIntervalSeconds": 15,
+    "TestCommand": "/pvpcdtest",
+    "IconTestCommand": "/pvpcdicon",
+    "ReminderIntervalSeconds": 5,
     "MinTribeTeamId": 50000
   },
-  "HudBuff": {
+  "HudNotification": {
     "Enabled": true,
-    "BlueprintPath": "/Game/Mods/PvPCooldowns/Buff_PvPCooldown.Buff_PvPCooldown_C"
+    "DisplayScale": 1.1,
+    "DisplayTime": 4.0,
+    "Icon": "players"
+  },
+  "HudBuff": {
+    "Enabled": false,
+    "BlueprintPath": ""
   },
   "Messages": {
-    "CooldownStarted": "PvP cooldown started: {0}s. Some commands (like /fill) are blocked until it ends.",
-    "SelfCheckOnCooldown": "PvP cooldown: {0}s remaining.",
-    "SelfCheckNone": "You are not on PvP cooldown.",
-    "Reminder": "PvP cooldown: {0}s remaining."
+    "CooldownStarted": "RAID / PVP started: {0}s. /fill and protected commands are blocked.",
+    "SelfCheckOnCooldown": "RAID / PVP: {0}s remaining.",
+    "SelfCheckNone": "RAID / PVP timer is not active.",
+    "Reminder": "RAID / PVP: {0}s remaining."
   }
 }

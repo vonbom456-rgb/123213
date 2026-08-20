@@ -1,8 +1,11 @@
-# DamageAlerts 1.2
+# DamageAlerts 1.3
 
-Native ARK floating damage numbers for the attacking player, plus a **red**
+Native ARK floating damage numbers, plus a **red**
 chat alert to a tribe's online members when their structure/dino/player takes
 damage from a different tribe. No client mod is required for the numbers.
+
+Version 1.3 forces ARK's own server-side floating-damage setting. Use
+`/datest` in chat to send a `12345` test number and show live hook counters.
 
 Hooks `APrimalCharacter.TakeDamage` and `APrimalStructure.TakeDamage` (the
 standard ASE damage hook points, same as DamageAlerts' sibling plugins) and
@@ -23,8 +26,12 @@ so rapid hits (turret fire, DoT) become one line, not spam.
   },
   "FloatingDamage": {
     "Enabled": true,
+    "ForceNativeServerSetting": true,
     "AlsoSendAttackerChat": false,
     "VerticalOffset": 100.0
+  },
+  "Diagnostics": {
+    "TestCommand": "/datest"
   },
   "Messages": {
     "AttackerHit": "+{0} урона по {1}",
