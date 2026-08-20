@@ -10,6 +10,9 @@ on:
       - "DamageAlerts/**"
       - ".github/workflows/build.yml"
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build Release x64
@@ -90,3 +93,15 @@ jobs:
           path: artifact/
           if-no-files-found: error
           retention-days: 30
+
+      - name: Create downloadable release archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "$env:GITHUB_WORKSPACE\artifact\*" `
+            -DestinationPath "$env:GITHUB_WORKSPACE\AllPlugins-Release-x64.zip" -Force
+          gh release create "plugins-${{ github.run_number }}" `
+            "$env:GITHUB_WORKSPACE\AllPlugins-Release-x64.zip" `
+            --title "ARK plugins build ${{ github.run_number }}" `
+            --notes "TurretControl, PvPCooldowns and DamageAlerts built for ArkApi 3.56 from commit ${{ github.sha }}."
+        env:
+          GH_TOKEN: ${{ github.token }}
