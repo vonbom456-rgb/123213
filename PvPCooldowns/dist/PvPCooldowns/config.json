@@ -18,6 +18,25 @@
     "TurretKillSeconds": 300,
     "TestSeconds": 80
   },
+  "Persistence": {
+    "Enabled": true,
+    "StateFile": "state.json",
+    "TagOfflineTribeMembers": true
+  },
+  "ArkShopBlocking": {
+    "Enabled": true,
+    "Commands": ["/shop", "/shopfind", "/buy", "/kit", "/buykit"]
+  },
+  "CombatLogout": {
+    "Enabled": true,
+    "KillCharacter": true,
+    "PenaltySeconds": 600
+  },
+  "SoftORP": {
+    "Enabled": true,
+    "GraceSeconds": 900,
+    "DamageMultiplier": 0.25
+  },
   "HudNotification": {
     "Enabled": true,
     "DisplayScale": 1.1,
@@ -33,6 +52,8 @@
     "CooldownEscalated": "RAID / PVP escalated to {0}s ({1}).",
     "SelfCheckOnCooldown": "RAID / PVP: {0}s remaining.",
     "SelfCheckNone": "RAID / PVP timer is not active.",
-    "Reminder": "RAID / PVP: {0}s remaining."
+    "Reminder": "RAID / PVP: {0}s remaining.",
+    "CommandBlocked": "RAID / PVP: {0}s remaining. Command is blocked.",
+    "CombatLogout": "Combat logout detected: character killed, RAID / PVP extended to {0}s."
   }
 }

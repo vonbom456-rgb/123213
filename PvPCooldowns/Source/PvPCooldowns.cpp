@@ -16,12 +16,16 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 #include "PvPCooldownsApi.h"
 #include "MiniJson.h"
 
@@ -45,6 +49,24 @@ struct Config {
     int turret_kill_seconds = 300;
     int test_seconds = 80;
 
+    // DuoRaidCore features.
+    bool persistence_enabled = true;
+    std::string state_file = "state.json";
+    bool tag_offline_tribe_members = true;
+
+    bool block_shop_commands = true;
+    std::vector<std::string> blocked_commands = {
+        "/shop", "/shopfind", "/buy", "/kit", "/buykit"
+    };
+
+    bool combat_logout_enabled = true;
+    bool combat_logout_kill_character = true;
+    int combat_logout_penalty_seconds = 600;
+
+    bool soft_orp_enabled = true;
+    int soft_orp_grace_seconds = 900;
+    float soft_orp_damage_multiplier = 0.25f;
+
     bool hud_notification_enabled = true;
     float hud_display_scale = 1.1f;
     float hud_display_time = 4.0f;
@@ -61,6 +83,8 @@ struct Config {
     std::string self_check_on_cooldown = "RAID / PVP: {0}s remaining.";
     std::string self_check_none = "RAID / PVP timer is not active.";
     std::string reminder = "RAID / PVP: {0}s remaining.";
+    std::string command_blocked = "RAID / PVP: {0}s remaining. Command is blocked.";
+    std::string combat_logout = "Combat logout detected: character killed, RAID / PVP extended to {0}s.";
 };
 
 Config g_config;
@@ -100,13 +124,33 @@ void SendHud(AShooterPlayerController* pc, const std::string& text, float displa
 }
 
 struct CooldownState {
-    std::chrono::steady_clock::time_point expiry;
+    std::int64_t expiry_unix = 0;
     int severity_seconds = 0;
+    int team = -1;
 };
 
-// steam_id -> cooldown state
+// Stable player data id -> cooldown. For the rare pre-spawn case, a Steam ID
+// is stored with the high bit set so it cannot collide with ARK player ids.
 std::unordered_map<uint64, CooldownState> g_cooldowns;
+std::unordered_map<int, std::int64_t> g_tribe_expiry;
+std::unordered_map<int, std::int64_t> g_tribe_last_online;
+bool g_state_dirty = false;
+std::int64_t g_next_state_save = 0;
+bool g_unloading = false;
 UClass* g_hud_buff_class = nullptr;
+
+std::int64_t UnixNow() {
+    return static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+uint64 PlayerKey(AShooterPlayerController* pc) {
+    if (!pc) return 0;
+    const uint64 player_id = pc->LinkedPlayerIDField();
+    if (player_id != 0) return player_id;
+    const uint64 steam_id = ArkApi::IApiUtils::GetSteamIdFromController(pc);
+    return steam_id == 0 ? 0 : (steam_id | (uint64(1) << 63));
+}
 
 bool IsPlayerOwnedTeam(int team) {
     return team >= g_config.min_tribe_team_id;
@@ -173,20 +217,39 @@ bool IsTurretDamage(AController* event_instigator, AActor* damage_causer) {
     return ActorOrOwnerIsTurret(damage_causer) || ActorOrOwnerIsTurret(event_instigator);
 }
 
-void StartCooldown(AShooterPlayerController* pc, int seconds, const std::string& reason) {
-    if (!pc) return;
-    const uint64 steam_id = ArkApi::IApiUtils::GetSteamIdFromController(pc);
-    if (steam_id == 0) return;
-
-    const auto now = std::chrono::steady_clock::now();
-    const auto existing = g_cooldowns.find(steam_id);
-    const bool was_active = existing != g_cooldowns.end() && now < existing->second.expiry;
+void StartCooldownByKey(uint64 key, int team, int seconds) {
+    if (key == 0) return;
+    const std::int64_t now = UnixNow();
+    const auto existing = g_cooldowns.find(key);
+    const bool was_active = existing != g_cooldowns.end() && now < existing->second.expiry_unix;
     const int duration = std::max(1, seconds);
     const bool escalated = was_active && duration > existing->second.severity_seconds;
-    CooldownState& state = g_cooldowns[steam_id];
+    CooldownState& state = g_cooldowns[key];
     if (!was_active) state = CooldownState{};
-    state.expiry = std::max(state.expiry, now + std::chrono::seconds(duration));
-    state.severity_seconds = std::max(state.severity_seconds, duration);
+    const std::int64_t new_expiry = std::max(state.expiry_unix, now + duration);
+    const int new_severity = std::max(state.severity_seconds, duration);
+    const int new_team = IsPlayerOwnedTeam(team) ? team : state.team;
+    if (new_expiry != state.expiry_unix || new_severity != state.severity_seconds || new_team != state.team) {
+        state.expiry_unix = new_expiry;
+        state.severity_seconds = new_severity;
+        state.team = new_team;
+        g_state_dirty = true;
+    }
+    (void)escalated;
+}
+
+void StartCooldown(AShooterPlayerController* pc, int seconds, const std::string& reason) {
+    if (!pc) return;
+    const uint64 key = PlayerKey(pc);
+    if (key == 0) return;
+
+    const std::int64_t now = UnixNow();
+    const auto existing = g_cooldowns.find(key);
+    const bool was_active = existing != g_cooldowns.end() && now < existing->second.expiry_unix;
+    const int duration = std::max(1, seconds);
+    const bool escalated = was_active && duration > existing->second.severity_seconds;
+    const int team = ArkApi::GetApiUtils().GetTribeID(pc);
+    StartCooldownByKey(key, team, duration);
     if ((!was_active || escalated) && g_config.show_messages) {
         std::string message = ReplaceToken(
             escalated ? g_config.cooldown_escalated : g_config.cooldown_started,
@@ -197,8 +260,29 @@ void StartCooldown(AShooterPlayerController* pc, int seconds, const std::string&
     }
 }
 
+FTribeData* FindLoadedTribeData(int team) {
+    AShooterGameMode* game_mode = ArkApi::GetApiUtils().GetShooterGameMode();
+    if (!game_mode) return nullptr;
+    for (FTribeData& tribe : game_mode->TribesDataField()) {
+        if (tribe.TribeIDField() == team) return &tribe;
+    }
+    return nullptr;
+}
+
 void StartCooldownForTribe(int team, int seconds, const std::string& reason) {
     if (!IsPlayerOwnedTeam(team)) return;
+    const std::int64_t expiry = UnixNow() + std::max(1, seconds);
+    g_tribe_expiry[team] = std::max(g_tribe_expiry[team], expiry);
+    g_state_dirty = true;
+
+    if (g_config.tag_offline_tribe_members) {
+        if (FTribeData* tribe = FindLoadedTribeData(team)) {
+            for (const unsigned int player_id : tribe->MembersPlayerDataIDField()) {
+                StartCooldownByKey(static_cast<uint64>(player_id), team, seconds);
+            }
+        }
+    }
+
     UWorld* world = ArkApi::GetApiUtils().GetWorld();
     if (!world) return;
     for (TWeakObjectPtr<APlayerController> weak_pc : world->PlayerControllerListField()) {
@@ -212,16 +296,17 @@ void StartCooldownForTribe(int team, int seconds, const std::string& reason) {
 // Returns remaining seconds (0 if not on cooldown), and lazily evicts expired entries.
 int RemainingSeconds(AShooterPlayerController* pc) {
     if (!pc) return 0;
-    const uint64 steam_id = ArkApi::IApiUtils::GetSteamIdFromController(pc);
-    const auto it = g_cooldowns.find(steam_id);
+    const uint64 key = PlayerKey(pc);
+    const auto it = g_cooldowns.find(key);
     if (it == g_cooldowns.end()) return 0;
 
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= it->second.expiry) {
+    const std::int64_t now = UnixNow();
+    if (now >= it->second.expiry_unix) {
         g_cooldowns.erase(it);
+        g_state_dirty = true;
         return 0;
     }
-    return static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(it->second.expiry - now).count()) + 1;
+    return static_cast<int>(it->second.expiry_unix - now);
 }
 
 bool IsOnCooldown(AShooterPlayerController* pc) { return RemainingSeconds(pc) > 0; }
@@ -255,6 +340,35 @@ void SendReminders(const std::chrono::steady_clock::time_point& now) {
 
 // --- Enemy damage / raid detection --------------------------------------
 
+bool TribeHasOnlineMember(int team) {
+    UWorld* world = ArkApi::GetApiUtils().GetWorld();
+    if (!world) return false;
+    for (TWeakObjectPtr<APlayerController> weak_pc : world->PlayerControllerListField()) {
+        auto* base_pc = weak_pc.Get();
+        if (!base_pc || !base_pc->IsA(AShooterPlayerController::GetPrivateStaticClass())) continue;
+        auto* pc = static_cast<AShooterPlayerController*>(base_pc);
+        if (ArkApi::GetApiUtils().GetTribeID(pc) == team) return true;
+    }
+    return false;
+}
+
+float ApplySoftOrp(int victim_team, float damage, AController* event_instigator, AActor* damage_causer) {
+    if (!g_config.soft_orp_enabled || damage <= 0.0f || !IsPlayerOwnedTeam(victim_team)) return damage;
+    const AttackerInfo attacker = ResolveAttacker(event_instigator, damage_causer);
+    if (!IsPlayerOwnedTeam(attacker.team) || attacker.team == victim_team) return damage;
+    if (TribeHasOnlineMember(victim_team)) return damage;
+
+    const std::int64_t now = UnixNow();
+    auto it = g_tribe_last_online.find(victim_team);
+    if (it == g_tribe_last_online.end()) {
+        g_tribe_last_online[victim_team] = now;
+        g_state_dirty = true;
+        return damage;
+    }
+    if (now - it->second < g_config.soft_orp_grace_seconds) return damage;
+    return damage * g_config.soft_orp_damage_multiplier;
+}
+
 DECLARE_HOOK(APrimalCharacter_TakeDamage, float, APrimalCharacter*, float, FDamageEvent*, AController*, AActor*);
 DECLARE_HOOK(APrimalStructure_TakeDamage, float, APrimalStructure*, float, FDamageEvent*, AController*, AActor*);
 
@@ -279,8 +393,12 @@ float Hook_APrimalCharacter_TakeDamage(APrimalCharacter* _this, float damage, FD
     const bool is_tame = _this && _this->IsA(APrimalDinoCharacter::GetPrivateStaticClass()) &&
         static_cast<APrimalDinoCharacter*>(_this)->BPIsTamed();
 
-    const float result =
-        APrimalCharacter_TakeDamage_original(_this, damage, damage_event, event_instigator, damage_causer);
+    // ORP protects tames, but intentionally does not make sleeping survivors
+    // invulnerable. Combat-log punishment handles players separately.
+    const float adjusted_damage = is_tame
+        ? ApplySoftOrp(victim_team, damage, event_instigator, damage_causer) : damage;
+    const float result = APrimalCharacter_TakeDamage_original(
+        _this, adjusted_damage, damage_event, event_instigator, damage_causer);
 
     const bool killed = _this && !was_dead && _this->IsDead();
     int seconds = is_player ? g_config.player_damage_seconds : g_config.tame_damage_seconds;
@@ -307,8 +425,9 @@ float Hook_APrimalStructure_TakeDamage(APrimalStructure* _this, float damage, FD
                                         AController* event_instigator, AActor* damage_causer) {
     const int victim_team = _this ? _this->TargetingTeamField() : -1;
     const bool was_dead = !_this || _this->IsDead();
-    const float result =
-        APrimalStructure_TakeDamage_original(_this, damage, damage_event, event_instigator, damage_causer);
+    const float result = APrimalStructure_TakeDamage_original(
+        _this, ApplySoftOrp(victim_team, damage, event_instigator, damage_causer),
+        damage_event, event_instigator, damage_causer);
 
     const bool destroyed = _this && !was_dead && _this->IsDead();
     HandleEnemyDamage(
@@ -317,6 +436,164 @@ float Hook_APrimalStructure_TakeDamage(APrimalStructure* _this, float damage, FD
         destroyed ? "structure destroyed" : "structure damage");
 
     return result;
+}
+
+// --- Persistent raid state, Ark Shop blocking and combat logout ---------
+
+std::string StatePath() {
+    return ArkApi::Tools::GetCurrentDir() + "/ArkApi/Plugins/PvPCooldowns/" + g_config.state_file;
+}
+
+void SaveState(bool force = false) {
+    if (!g_config.persistence_enabled || (!force && !g_state_dirty)) return;
+    const std::int64_t now = UnixNow();
+    if (!force && now < g_next_state_save) return;
+    g_next_state_save = now + 2;
+
+    const std::string path = StatePath();
+    const std::string temp = path + ".tmp";
+    std::ofstream file(temp, std::ios::binary | std::ios::trunc);
+    if (!file.is_open()) {
+        Log::GetLog()->error("PvPCooldowns: cannot write state file {}", temp);
+        return;
+    }
+
+    file << "{\n  \"players\": [\n";
+    bool first = true;
+    for (const auto& entry : g_cooldowns) {
+        if (entry.second.expiry_unix <= now) continue;
+        if (!first) file << ",\n";
+        first = false;
+        file << "    {\"id\":\"" << entry.first << "\",\"expiry\":"
+             << entry.second.expiry_unix << ",\"severity\":"
+             << entry.second.severity_seconds << ",\"team\":" << entry.second.team << "}";
+    }
+    file << "\n  ],\n  \"tribes\": [\n";
+    first = true;
+    std::unordered_set<int> teams;
+    for (const auto& entry : g_tribe_expiry) teams.insert(entry.first);
+    for (const auto& entry : g_tribe_last_online) teams.insert(entry.first);
+    for (const int team : teams) {
+        if (!first) file << ",\n";
+        first = false;
+        file << "    {\"id\":" << team << ",\"expiry\":" << g_tribe_expiry[team]
+             << ",\"lastOnline\":" << g_tribe_last_online[team] << "}";
+    }
+    file << "\n  ]\n}\n";
+    file.close();
+    if (!file) {
+        Log::GetLog()->error("PvPCooldowns: failed while writing state file {}", temp);
+        return;
+    }
+    if (!MoveFileExA(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        Log::GetLog()->error("PvPCooldowns: cannot replace state file {} (Windows error {})", path, GetLastError());
+        return;
+    }
+    g_state_dirty = false;
+}
+
+void LoadState() {
+    if (!g_config.persistence_enabled) return;
+    std::ifstream file(StatePath(), std::ios::binary);
+    if (!file.is_open()) {
+        Log::GetLog()->info("PvPCooldowns: no previous state file; starting clean");
+        return;
+    }
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    const minijson::Value root = minijson::parse(ss.str());
+    const std::int64_t now = UnixNow();
+
+    if (const minijson::Value* players = root.find("players"); players && players->is_array()) {
+        for (const minijson::Value& item : players->array()) {
+            if (!item.is_object()) continue;
+            const minijson::Value* id_value = item.find("id");
+            const minijson::Value* expiry_value = item.find("expiry");
+            if (!id_value || !id_value->is_string() || !expiry_value || !expiry_value->is_number()) continue;
+            try {
+                const uint64 id = std::stoull(id_value->string());
+                CooldownState state;
+                state.expiry_unix = static_cast<std::int64_t>(expiry_value->number());
+                if (const auto* v = item.find("severity")) state.severity_seconds = v->get_int(0);
+                if (const auto* v = item.find("team")) state.team = v->get_int(-1);
+                if (id != 0 && state.expiry_unix > now) g_cooldowns[id] = state;
+            } catch (...) {}
+        }
+    }
+    if (const minijson::Value* tribes = root.find("tribes"); tribes && tribes->is_array()) {
+        for (const minijson::Value& item : tribes->array()) {
+            if (!item.is_object()) continue;
+            const int team = item.find("id") ? item.find("id")->get_int(-1) : -1;
+            if (!IsPlayerOwnedTeam(team)) continue;
+            if (const auto* v = item.find("expiry")) {
+                const std::int64_t expiry = static_cast<std::int64_t>(v->is_number() ? v->number() : 0);
+                if (expiry > now) g_tribe_expiry[team] = expiry;
+            }
+            if (const auto* v = item.find("lastOnline")) {
+                g_tribe_last_online[team] = static_cast<std::int64_t>(v->is_number() ? v->number() : 0);
+            }
+        }
+    }
+    Log::GetLog()->info("PvPCooldowns: restored {} player cooldown(s) and {} tribe raid state(s)",
+        g_cooldowns.size(), g_tribe_expiry.size());
+}
+
+std::string FirstWordLower(FString* message) {
+    if (!message) return {};
+    std::istringstream input(message->ToString());
+    std::string word;
+    input >> word;
+    std::transform(word.begin(), word.end(), word.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return word;
+}
+
+bool IsBlockedCommand(const std::string& command) {
+    if (!g_config.block_shop_commands) return false;
+    for (std::string configured : g_config.blocked_commands) {
+        std::transform(configured.begin(), configured.end(), configured.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (command == configured) return true;
+    }
+    return false;
+}
+
+DECLARE_HOOK(AShooterPlayerController_ServerSendChatMessage_Implementation, void,
+    AShooterPlayerController*, FString*, EChatSendMode::Type);
+DECLARE_HOOK(AShooterGameMode_Logout, void, AShooterGameMode*, AController*);
+
+void Hook_AShooterPlayerController_ServerSendChatMessage_Implementation(
+    AShooterPlayerController* pc, FString* message, EChatSendMode::Type mode) {
+    if (pc && IsBlockedCommand(FirstWordLower(message))) {
+        const int remaining = RemainingSeconds(pc);
+        if (remaining > 0) {
+            Send(pc, ReplaceToken(g_config.command_blocked, "{0}", std::to_string(remaining)));
+            SendHud(pc, ReplaceToken(g_config.command_blocked, "{0}", std::to_string(remaining)));
+            return;
+        }
+    }
+    AShooterPlayerController_ServerSendChatMessage_Implementation_original(pc, message, mode);
+}
+
+void Hook_AShooterGameMode_Logout(AShooterGameMode* game_mode, AController* exiting) {
+    auto* pc = exiting && exiting->IsA(AShooterPlayerController::GetPrivateStaticClass())
+        ? static_cast<AShooterPlayerController*>(exiting) : nullptr;
+    if (!g_unloading && g_config.combat_logout_enabled && pc && RemainingSeconds(pc) > 0) {
+        const int team = ArkApi::GetApiUtils().GetTribeID(pc);
+        StartCooldownByKey(PlayerKey(pc), team, g_config.combat_logout_penalty_seconds);
+        if (IsPlayerOwnedTeam(team)) {
+            g_tribe_expiry[team] = std::max(g_tribe_expiry[team],
+                UnixNow() + g_config.combat_logout_penalty_seconds);
+        }
+        SaveState(true);
+        Log::GetLog()->warn("PvPCooldowns: combat logout punished (steam {}, player id {}, tribe {})",
+            ArkApi::IApiUtils::GetSteamIdFromController(pc), pc->LinkedPlayerIDField(), team);
+        AShooterCharacter* character = pc->GetPlayerCharacter();
+        if (g_config.combat_logout_kill_character && character && !character->IsDead()) {
+            character->Suicide();
+        }
+    }
+    AShooterGameMode_Logout_original(game_mode, exiting);
 }
 
 // --- Outbound link to TurretControl (best effort, retried until it works) ---
@@ -412,22 +689,48 @@ void SyncHudBuff(AShooterPlayerController* pc, int remaining) {
 void UpkeepTimer() {
     TryWireTurretControl();
 
-    const auto now = std::chrono::steady_clock::now();
+    const std::int64_t unix_now = UnixNow();
     for (auto it = g_cooldowns.begin(); it != g_cooldowns.end();) {
-        it = (now >= it->second.expiry) ? g_cooldowns.erase(it) : std::next(it);
+        if (unix_now >= it->second.expiry_unix) {
+            it = g_cooldowns.erase(it);
+            g_state_dirty = true;
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = g_tribe_expiry.begin(); it != g_tribe_expiry.end();) {
+        if (unix_now >= it->second) {
+            it = g_tribe_expiry.erase(it);
+            g_state_dirty = true;
+        } else {
+            ++it;
+        }
     }
 
     UWorld* world = ArkApi::GetApiUtils().GetWorld();
-    if (world && g_hud_buff_class) {
+    if (world) {
         for (TWeakObjectPtr<APlayerController> weak_pc : world->PlayerControllerListField()) {
             auto* base_pc = weak_pc.Get();
             if (!base_pc || !base_pc->IsA(AShooterPlayerController::GetPrivateStaticClass())) continue;
             auto* pc = static_cast<AShooterPlayerController*>(base_pc);
-            SyncHudBuff(pc, RemainingSeconds(pc));
+            const int team = ArkApi::GetApiUtils().GetTribeID(pc);
+            if (IsPlayerOwnedTeam(team)) {
+                const auto seen = g_tribe_last_online.find(team);
+                if (seen == g_tribe_last_online.end() || unix_now - seen->second >= 30) {
+                    g_tribe_last_online[team] = unix_now;
+                    g_state_dirty = true;
+                }
+                const auto raid = g_tribe_expiry.find(team);
+                if (raid != g_tribe_expiry.end() && raid->second > unix_now) {
+                    StartCooldown(pc, static_cast<int>(raid->second - unix_now), "offline tribe raid restored");
+                }
+            }
+            if (g_hud_buff_class) SyncHudBuff(pc, RemainingSeconds(pc));
         }
     }
 
-    SendReminders(now);
+    SendReminders(std::chrono::steady_clock::now());
+    SaveState();
 }
 
 // --- Optional self-check chat command ---
@@ -451,7 +754,7 @@ void TestCommand(AShooterPlayerController* pc, FString* message, EChatSendMode::
         if (requested > 0 && requested <= 3600) seconds = requested;
     }
     StartCooldown(pc, seconds, "manual test");
-    Send(pc, "PvPCooldowns v1.3 test started. Use /pvpcd to inspect the timer.");
+    Send(pc, "PvPCooldowns v2.0 DuoRaidCore test started. Use /pvpcd to inspect the timer.");
 }
 
 void IconTestCommand(AShooterPlayerController* pc, FString* message, EChatSendMode::Type) {
@@ -493,6 +796,27 @@ Config ParseConfig(const minijson::Value& root) {
     c.structure_destroyed_seconds = minijson::integer(root, "Durations", "StructureDestroyedSeconds", c.structure_destroyed_seconds);
     c.turret_kill_seconds = minijson::integer(root, "Durations", "TurretKillSeconds", c.turret_kill_seconds);
     c.test_seconds = minijson::integer(root, "Durations", "TestSeconds", c.test_seconds);
+    c.persistence_enabled = minijson::boolean(root, "Persistence", "Enabled", c.persistence_enabled);
+    c.state_file = minijson::str(root, "Persistence", "StateFile", c.state_file);
+    c.tag_offline_tribe_members = minijson::boolean(
+        root, "Persistence", "TagOfflineTribeMembers", c.tag_offline_tribe_members);
+    c.block_shop_commands = minijson::boolean(root, "ArkShopBlocking", "Enabled", c.block_shop_commands);
+    if (const minijson::Value* commands = minijson::path(root, "ArkShopBlocking", "Commands");
+        commands && commands->is_array()) {
+        c.blocked_commands.clear();
+        for (const minijson::Value& value : commands->array()) {
+            if (value.is_string() && !value.string().empty()) c.blocked_commands.push_back(value.string());
+        }
+    }
+    c.combat_logout_enabled = minijson::boolean(root, "CombatLogout", "Enabled", c.combat_logout_enabled);
+    c.combat_logout_kill_character = minijson::boolean(
+        root, "CombatLogout", "KillCharacter", c.combat_logout_kill_character);
+    c.combat_logout_penalty_seconds = minijson::integer(
+        root, "CombatLogout", "PenaltySeconds", c.combat_logout_penalty_seconds);
+    c.soft_orp_enabled = minijson::boolean(root, "SoftORP", "Enabled", c.soft_orp_enabled);
+    c.soft_orp_grace_seconds = minijson::integer(root, "SoftORP", "GraceSeconds", c.soft_orp_grace_seconds);
+    c.soft_orp_damage_multiplier = minijson::number(
+        root, "SoftORP", "DamageMultiplier", c.soft_orp_damage_multiplier);
     c.hud_notification_enabled = minijson::boolean(root, "HudNotification", "Enabled", c.hud_notification_enabled);
     c.hud_display_scale = minijson::number(root, "HudNotification", "DisplayScale", c.hud_display_scale);
     c.hud_display_time = minijson::number(root, "HudNotification", "DisplayTime", c.hud_display_time);
@@ -505,6 +829,8 @@ Config ParseConfig(const minijson::Value& root) {
     c.self_check_on_cooldown = minijson::str(root, "Messages", "SelfCheckOnCooldown", c.self_check_on_cooldown);
     c.self_check_none = minijson::str(root, "Messages", "SelfCheckNone", c.self_check_none);
     c.reminder = minijson::str(root, "Messages", "Reminder", c.reminder);
+    c.command_blocked = minijson::str(root, "Messages", "CommandBlocked", c.command_blocked);
+    c.combat_logout = minijson::str(root, "Messages", "CombatLogout", c.combat_logout);
 
     c.min_damage_to_trigger = std::max(0.0f, c.min_damage_to_trigger);
     c.min_tribe_team_id = std::max(1, c.min_tribe_team_id);
@@ -516,6 +842,13 @@ Config ParseConfig(const minijson::Value& root) {
     c.structure_destroyed_seconds = std::max(1, c.structure_destroyed_seconds);
     c.turret_kill_seconds = std::max(1, c.turret_kill_seconds);
     c.test_seconds = std::max(1, c.test_seconds);
+    c.combat_logout_penalty_seconds = std::max(1, c.combat_logout_penalty_seconds);
+    c.soft_orp_grace_seconds = std::max(0, c.soft_orp_grace_seconds);
+    c.soft_orp_damage_multiplier = std::max(0.0f, std::min(1.0f, c.soft_orp_damage_multiplier));
+    if (c.state_file.empty() || c.state_file.find("..") != std::string::npos ||
+        c.state_file.find('/') != std::string::npos || c.state_file.find('\\') != std::string::npos) {
+        c.state_file = "state.json";
+    }
     return c;
 }
 
@@ -533,13 +866,22 @@ void ReadConfig() {
 
 void Load() {
     Log::Get().Init("PvPCooldowns");
-    Log::GetLog()->info("Loading plugin - PvPCooldowns v1.3 TieredRaidCombat");
+    Log::GetLog()->info("Loading plugin - PvPCooldowns v2.0 DuoRaidCore");
+    PvPCooldowns::g_unloading = false;
 
     try {
         PvPCooldowns::ReadConfig();
     } catch (const std::exception& e) {
         Log::GetLog()->error("PvPCooldowns: config error ({}), using defaults", e.what());
         PvPCooldowns::g_config = PvPCooldowns::Config();
+    }
+    try {
+        PvPCooldowns::LoadState();
+    } catch (const std::exception& e) {
+        Log::GetLog()->error("PvPCooldowns: state restore failed ({}); starting with empty state", e.what());
+        PvPCooldowns::g_cooldowns.clear();
+        PvPCooldowns::g_tribe_expiry.clear();
+        PvPCooldowns::g_tribe_last_online.clear();
     }
     PvPCooldowns::LoadHudBuffClass();
 
@@ -549,6 +891,12 @@ void Load() {
     ArkApi::GetHooks().SetHook("APrimalStructure.TakeDamage",
         &PvPCooldowns::Hook_APrimalStructure_TakeDamage,
         &PvPCooldowns::APrimalStructure_TakeDamage_original);
+    ArkApi::GetHooks().SetHook("AShooterPlayerController.ServerSendChatMessage_Implementation",
+        &PvPCooldowns::Hook_AShooterPlayerController_ServerSendChatMessage_Implementation,
+        &PvPCooldowns::AShooterPlayerController_ServerSendChatMessage_Implementation_original);
+    ArkApi::GetHooks().SetHook("AShooterGameMode.Logout",
+        &PvPCooldowns::Hook_AShooterGameMode_Logout,
+        &PvPCooldowns::AShooterGameMode_Logout_original);
 
     if (!PvPCooldowns::g_config.self_check_command.empty()) {
         ArkApi::GetCommands().AddChatCommand(
@@ -571,6 +919,8 @@ void Load() {
 }
 
 void Unload() {
+    PvPCooldowns::g_unloading = true;
+    PvPCooldowns::SaveState(true);
     PvPCooldowns::UnwireTurretControl();
     ArkApi::GetCommands().RemoveOnTimerCallback("PvPCooldowns.Upkeep");
     if (!PvPCooldowns::g_config.self_check_command.empty()) {
@@ -584,8 +934,13 @@ void Unload() {
     }
     ArkApi::GetHooks().DisableHook("APrimalCharacter.TakeDamage", &PvPCooldowns::Hook_APrimalCharacter_TakeDamage);
     ArkApi::GetHooks().DisableHook("APrimalStructure.TakeDamage", &PvPCooldowns::Hook_APrimalStructure_TakeDamage);
+    ArkApi::GetHooks().DisableHook("AShooterPlayerController.ServerSendChatMessage_Implementation",
+        &PvPCooldowns::Hook_AShooterPlayerController_ServerSendChatMessage_Implementation);
+    ArkApi::GetHooks().DisableHook("AShooterGameMode.Logout", &PvPCooldowns::Hook_AShooterGameMode_Logout);
     PvPCooldowns::g_hud_buff_class = nullptr;
     PvPCooldowns::g_cooldowns.clear();
+    PvPCooldowns::g_tribe_expiry.clear();
+    PvPCooldowns::g_tribe_last_online.clear();
 }
 
 extern "C" __declspec(dllexport) void __fastcall Plugin_Init() noexcept {

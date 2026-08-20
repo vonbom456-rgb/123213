@@ -1,7 +1,7 @@
 {
   "FullName": "PvPCooldowns",
-  "Description": "Tags both tribes on enemy damage to players, tames or structures; shows a native HUD timer and lets other plugins block commands",
-  "Version": 1.3,
+  "Description": "DuoRaidCore: persistent online/offline tribe raid tags, Ark Shop blocking, combat logout punishment and soft ORP",
+  "Version": 2.0,
   "MinApiVersion": 3.56,
   "Dependencies": []
 }
