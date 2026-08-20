@@ -89,6 +89,20 @@ spawns that visual actor through `AShooterPlayerController::SpawnActor`:
 The optional Blueprint is not automatically scaled. The native sphere always
 tracks `FillRadius` exactly.
 
+### Green `/fill` result notification
+
+After a successful fill, the invoking player receives a green native ARK HUD
+notification at the top of the screen with the number of filled turrets and
+the ammunition used. It uses the built-in structures icon and needs no mod.
+
+```json
+"FillNotification": {
+  "Enabled": true,
+  "Scale": 1.1,
+  "DisplayTime": 5
+}
+```
+
 ## Inventory cap enforcement
 
 `InventoryCapEnabled` (default `true`) hooks the game's own `AllowAddInventoryItem_MaxQuantity` check on supported turret inventories. This means a turret **cannot physically hold more than its configured limit** through *any* manual path — drag-and-drop, "transfer all", crafting straight into the turret, etc. The game clamps the amount actually added and leaves the remainder in the source inventory; nothing is removed or lost at this stage.

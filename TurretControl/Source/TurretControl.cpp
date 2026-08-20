@@ -57,6 +57,10 @@ struct Config {
     float fill_radius_hologram_spawn_y_offset = 0.0f;
     float fill_radius_hologram_spawn_z_offset = 0.0f;
 
+    bool fill_notification_enabled = true;
+    float fill_notification_scale = 1.1f;
+    float fill_notification_time = 5.0f;
+
     bool vanilla_heavy = true;
     bool vanilla_tek = true;
     bool vanilla_auto = true;
@@ -133,6 +137,14 @@ void Send(AShooterPlayerController* pc, const std::string& text) {
     const FString sender = F(g_config.sender);
     const FString msg = F(text);
     ArkApi::GetApiUtils().SendChatMessage(pc, sender, *msg);
+}
+
+void SendFillNotification(AShooterPlayerController* pc, const std::string& text) {
+    if (!pc || text.empty() || !g_config.fill_notification_enabled) return;
+    const FString msg = F(text);
+    ArkApi::GetApiUtils().SendNotification(
+        pc, FColorList::Green, g_config.fill_notification_scale,
+        g_config.fill_notification_time, pc->PingIcon_StructuresField(), *msg);
 }
 
 std::string GetClassFullName(UClass* cls) {
@@ -402,14 +414,14 @@ int TransferFamily(UPrimalInventoryComponent* from, UPrimalInventoryComponent* t
             const int refunded = AddExact(from, actual_class, kind, refund);
             if (refunded != refund) {
                 Log::GetLog()->error(
-                    "TurretControl v1.5: refund failed. class='{}' expected={} refunded={}",
+                    "TurretControl v1.6: refund failed. class='{}' expected={} refunded={}",
                     GetClassFullName(actual_class), refund, refunded);
             }
         }
 
         const int turret_after = FamilyQuantity(to, kind);
         Log::GetLog()->info(
-            "TurretControl v1.5 fill: turret='{}' template='{}' player_class='{}' player_before={} turret_before={} requested={} removed={} added={} turret_after={}",
+            "TurretControl v1.6 fill: turret='{}' template='{}' player_class='{}' player_before={} turret_before={} requested={} removed={} added={} turret_after={}",
             GetClassFullName(turret),
             GetClassFullName(turret->AmmoItemTemplateField().uClass),
             GetClassFullName(actual_class),
@@ -647,14 +659,14 @@ void FillCommandImpl(AShooterPlayerController* pc, FString*, EChatSendMode::Type
             else arb_used -= std::min(arb_used, refunded);
 
             Log::GetLog()->warn(
-                "TurretControl v1.5 /fill safety cap: turret='{}' kind={} before={} after={} limit={} overflow_removed={} refunded_to_player={}",
+                "TurretControl v1.6 /fill safety cap: turret='{}' kind={} before={} after={} limit={} overflow_removed={} refunded_to_player={}",
                 GetClassFullName(ref.turret), static_cast<int>(ref.kind), live_before, after, limit, removed, refunded);
         }
     }
 
     if (filled_turrets <= 0) {
         Log::GetLog()->warn(
-            "TurretControl v1.5: /fill found {} valid turrets but transferred nothing. ARB={} Shards={}",
+            "TurretControl v1.6: /fill found {} valid turrets but transferred nothing. ARB={} Shards={}",
             turrets.size(), arb_available, shards_available);
         Send(pc, g_config.fill_failed);
         return;
@@ -665,6 +677,7 @@ void FillCommandImpl(AShooterPlayerController* pc, FString*, EChatSendMode::Type
     message = ReplaceToken(message, "{1}", std::to_string(arb_used));
     message = ReplaceToken(message, "{2}", std::to_string(shards_used));
     Send(pc, message);
+    SendFillNotification(pc, message);
 }
 
 void TurretsCommandImpl(AShooterPlayerController* pc, FString* message, EChatSendMode::Type) {
@@ -786,7 +799,7 @@ bool Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity(
         *requested_quantity_out = allowed;
 
     Log::GetLog()->debug(
-        "TurretControl v1.5 inventory cap: turret='{}' item='{}' current={} limit={} requested={} original_allowed={} final_allowed={}",
+        "TurretControl v1.6 inventory cap: turret='{}' item='{}' current={} limit={} requested={} original_allowed={} final_allowed={}",
         GetClassFullName(turret),
         GetClassFullName(item),
         current,
@@ -919,7 +932,7 @@ void HardCapTimer() {
             }
 
             Log::GetLog()->warn(
-                "TurretControl v1.5 hard cap: turret='{}' kind={} current={} limit={} overflow={} removed={} refunded={}",
+                "TurretControl v1.6 hard cap: turret='{}' kind={} current={} limit={} overflow={} removed={} refunded={}",
                 GetClassFullName(turret), static_cast<int>(kind), current, limit, overflow, removed, refunded);
         }
     }
@@ -947,7 +960,7 @@ void RuntimeTimer() {
         g_runtime_ready = true;
         ApplyInventoryHookState();
         Log::GetLog()->info(
-            "TurretControl v1.5 runtime enabled after world startup (InventoryCap={}, HardCap={})",
+            "TurretControl v1.6 runtime enabled after world startup (InventoryCap={}, HardCap={})",
             g_config.inventory_cap_enabled, g_config.hard_cap_enabled);
     }
 
@@ -1007,6 +1020,10 @@ Config ParseConfig(const minijson::Value& root) {
     c.fill_radius_hologram_spawn_y_offset = minijson::number(root, "FillRadiusHologram", "SpawnYOffset", c.fill_radius_hologram_spawn_y_offset);
     c.fill_radius_hologram_spawn_z_offset = minijson::number(root, "FillRadiusHologram", "SpawnZOffset", c.fill_radius_hologram_spawn_z_offset);
 
+    c.fill_notification_enabled = minijson::boolean(root, "FillNotification", "Enabled", c.fill_notification_enabled);
+    c.fill_notification_scale = minijson::number(root, "FillNotification", "Scale", c.fill_notification_scale);
+    c.fill_notification_time = minijson::number(root, "FillNotification", "DisplayTime", c.fill_notification_time);
+
     c.vanilla_heavy = minijson::boolean(root, "Turrets", "VanillaHeavy", c.vanilla_heavy);
     c.vanilla_tek = minijson::boolean(root, "Turrets", "VanillaTek", c.vanilla_tek);
     c.vanilla_auto = minijson::boolean(root, "Turrets", "VanillaAuto", c.vanilla_auto);
@@ -1041,6 +1058,8 @@ Config ParseConfig(const minijson::Value& root) {
     c.hard_cap_interval_seconds = std::max(1, c.hard_cap_interval_seconds);
     c.hard_cap_scan_radius = std::max(1000.0f, c.hard_cap_scan_radius);
     c.startup_delay_seconds = std::max(0, c.startup_delay_seconds);
+    c.fill_notification_scale = std::max(0.1f, c.fill_notification_scale);
+    c.fill_notification_time = std::max(0.1f, c.fill_notification_time);
     return c;
 }
 
@@ -1115,7 +1134,7 @@ void Load() {
     g_inventory_hook_installed = false;
     ArkApi::GetCommands().AddOnTimerCallback("TurretControl.Runtime", &RuntimeTimer);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.Reload", &ReloadCommand);
-    Log::GetLog()->info("Loaded plugin - TurretControl v1.5 FillRangeSphere");
+    Log::GetLog()->info("Loaded plugin - TurretControl v1.6 FillHudNotification");
 }
 
 void Unload() {

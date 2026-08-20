@@ -5,7 +5,7 @@
     "SelfCheckCommand": "/pvpcd",
     "TestCommand": "/pvpcdtest",
     "IconTestCommand": "/pvpcdicon",
-    "ReminderIntervalSeconds": 5,
+    "ReminderIntervalSeconds": 30,
     "MinTribeTeamId": 50000
   },
   "Durations": {

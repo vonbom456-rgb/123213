@@ -30,7 +30,7 @@ projectiles. Wild dinos are explicitly rejected, and `MinTribeTeamId`
     "SelfCheckCommand": "/pvpcd",
     "TestCommand": "/pvpcdtest",
     "IconTestCommand": "/pvpcdicon",
-    "ReminderIntervalSeconds": 5,
+    "ReminderIntervalSeconds": 30,
     "MinTribeTeamId": 50000
   },
   "Durations": {
@@ -59,7 +59,7 @@ projectiles. Wild dinos are explicitly rejected, and `MinTribeTeamId`
 `/pvpcd` lets a player check their own remaining cooldown (set
 `SelfCheckCommand` to `""` to disable it). While a cooldown is active, a
 reminder with the remaining time is also re-sent to chat and the native
-on-screen notification every `ReminderIntervalSeconds` (default 5; set to
+on-screen notification every `ReminderIntervalSeconds` (default 30; set to
 `0` to disable).
 
 ## Optional custom crossed-swords buff icon

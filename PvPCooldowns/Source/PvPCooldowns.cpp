@@ -37,7 +37,7 @@ struct Config {
     std::string self_check_command = "/pvpcd";
     std::string test_command = "/pvpcdtest";
     std::string icon_test_command = "/pvpcdicon";
-    int reminder_interval_seconds = 5; // 0 disables periodic reminders
+    int reminder_interval_seconds = 30; // 0 disables periodic reminders
     int min_tribe_team_id = 50000;
 
     int player_damage_seconds = 80;

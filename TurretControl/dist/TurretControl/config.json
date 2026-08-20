@@ -29,6 +29,11 @@
     "SpawnYOffset": 0,
     "SpawnZOffset": 0
   },
+  "FillNotification": {
+    "Enabled": true,
+    "Scale": 1.1,
+    "DisplayTime": 5
+  },
   "Turrets": {
     "VanillaHeavy": true,
     "VanillaTek": true,
