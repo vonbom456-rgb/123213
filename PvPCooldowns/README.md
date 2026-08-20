@@ -1,7 +1,10 @@
-# PvPCooldowns 1.2
+# PvPCooldowns 1.3
 
-Version 1.2 starts the RAID/PVP timer on real enemy damage to a player,
-tamed dino or structure and tags every online member of both tribes. It uses
+Version 1.3 starts a tiered RAID/PVP timer on real enemy damage to a player,
+tamed dino or structure and tags every online member of both tribes. Player
+and tame hits default to 80 seconds; structure damage, kills, structure
+destruction and turret kills default to 300 seconds. A stronger event extends
+and escalates a shorter timer, while a weaker event never shortens it. It uses
 ARK's native on-screen notification with a vanilla icon, so no client mod is
 required. `/pvpcdtest` starts a safe self-test; `/pvpcd` shows the remaining
 time. `/pvpcdicon default|players|dinos|structures` previews every safe icon
@@ -22,7 +25,6 @@ projectiles. Wild dinos are explicitly rejected, and `MinTribeTeamId`
 ```json
 {
   "General": {
-    "CooldownSeconds": 45,
     "MinDamageToTrigger": 1.0,
     "ShowMessages": true,
     "SelfCheckCommand": "/pvpcd",
@@ -30,6 +32,16 @@ projectiles. Wild dinos are explicitly rejected, and `MinTribeTeamId`
     "IconTestCommand": "/pvpcdicon",
     "ReminderIntervalSeconds": 5,
     "MinTribeTeamId": 50000
+  },
+  "Durations": {
+    "PlayerDamageSeconds": 80,
+    "TameDamageSeconds": 80,
+    "StructureDamageSeconds": 300,
+    "PlayerKillSeconds": 300,
+    "TameKillSeconds": 300,
+    "StructureDestroyedSeconds": 300,
+    "TurretKillSeconds": 300,
+    "TestSeconds": 80
   },
   "HudNotification": {
     "Enabled": true,

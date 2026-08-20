@@ -28,7 +28,6 @@
 namespace PvPCooldowns {
 
 struct Config {
-    int cooldown_seconds = 45;
     float min_damage_to_trigger = 1.0f;
     bool show_messages = true;
     std::string self_check_command = "/pvpcd";
@@ -36,6 +35,15 @@ struct Config {
     std::string icon_test_command = "/pvpcdicon";
     int reminder_interval_seconds = 5; // 0 disables periodic reminders
     int min_tribe_team_id = 50000;
+
+    int player_damage_seconds = 80;
+    int tame_damage_seconds = 80;
+    int structure_damage_seconds = 300;
+    int player_kill_seconds = 300;
+    int tame_kill_seconds = 300;
+    int structure_destroyed_seconds = 300;
+    int turret_kill_seconds = 300;
+    int test_seconds = 80;
 
     bool hud_notification_enabled = true;
     float hud_display_scale = 1.1f;
@@ -48,7 +56,8 @@ struct Config {
     bool hud_buff_enabled = false;
     std::string hud_buff_blueprint;
 
-    std::string cooldown_started = "RAID / PVP started: {0}s. /fill and protected commands are blocked.";
+    std::string cooldown_started = "RAID / PVP: {0}s ({1}). /fill and protected commands are blocked.";
+    std::string cooldown_escalated = "RAID / PVP escalated to {0}s ({1}).";
     std::string self_check_on_cooldown = "RAID / PVP: {0}s remaining.";
     std::string self_check_none = "RAID / PVP timer is not active.";
     std::string reminder = "RAID / PVP: {0}s remaining.";
@@ -90,8 +99,13 @@ void SendHud(AShooterPlayerController* pc, const std::string& text, float displa
         icon, *message);
 }
 
-// steam_id -> cooldown expiry
-std::unordered_map<uint64, std::chrono::steady_clock::time_point> g_cooldowns;
+struct CooldownState {
+    std::chrono::steady_clock::time_point expiry;
+    int severity_seconds = 0;
+};
+
+// steam_id -> cooldown state
+std::unordered_map<uint64, CooldownState> g_cooldowns;
 UClass* g_hud_buff_class = nullptr;
 
 bool IsPlayerOwnedTeam(int team) {
@@ -136,24 +150,54 @@ AttackerInfo ResolveAttacker(AController* event_instigator, AActor* damage_cause
     return result;
 }
 
-void StartCooldown(AShooterPlayerController* pc) {
+std::string ActorNameLower(AActor* actor) {
+    if (!actor) return {};
+    FString name;
+    actor->GetFullName(&name, nullptr);
+    std::string out = name.ToString();
+    std::transform(out.begin(), out.end(), out.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return out;
+}
+
+bool ActorOrOwnerIsTurret(AActor* actor) {
+    for (int depth = 0; actor && depth < 4; ++depth) {
+        if (actor->IsA(APrimalStructureTurret::GetPrivateStaticClass())) return true;
+        if (ActorNameLower(actor).find("turret") != std::string::npos) return true;
+        actor = actor->OwnerField();
+    }
+    return false;
+}
+
+bool IsTurretDamage(AController* event_instigator, AActor* damage_causer) {
+    return ActorOrOwnerIsTurret(damage_causer) || ActorOrOwnerIsTurret(event_instigator);
+}
+
+void StartCooldown(AShooterPlayerController* pc, int seconds, const std::string& reason) {
     if (!pc) return;
     const uint64 steam_id = ArkApi::IApiUtils::GetSteamIdFromController(pc);
     if (steam_id == 0) return;
 
     const auto now = std::chrono::steady_clock::now();
     const auto existing = g_cooldowns.find(steam_id);
-    const bool was_active = existing != g_cooldowns.end() && now < existing->second;
-    g_cooldowns[steam_id] = now + std::chrono::seconds(std::max(1, g_config.cooldown_seconds));
-    if (!was_active && g_config.show_messages) {
-        const std::string message = ReplaceToken(
-            g_config.cooldown_started, "{0}", std::to_string(g_config.cooldown_seconds));
+    const bool was_active = existing != g_cooldowns.end() && now < existing->second.expiry;
+    const int duration = std::max(1, seconds);
+    const bool escalated = was_active && duration > existing->second.severity_seconds;
+    CooldownState& state = g_cooldowns[steam_id];
+    if (!was_active) state = CooldownState{};
+    state.expiry = std::max(state.expiry, now + std::chrono::seconds(duration));
+    state.severity_seconds = std::max(state.severity_seconds, duration);
+    if ((!was_active || escalated) && g_config.show_messages) {
+        std::string message = ReplaceToken(
+            escalated ? g_config.cooldown_escalated : g_config.cooldown_started,
+            "{0}", std::to_string(duration));
+        message = ReplaceToken(message, "{1}", reason);
         Send(pc, message);
         SendHud(pc, message);
     }
 }
 
-void StartCooldownForTribe(int team) {
+void StartCooldownForTribe(int team, int seconds, const std::string& reason) {
     if (!IsPlayerOwnedTeam(team)) return;
     UWorld* world = ArkApi::GetApiUtils().GetWorld();
     if (!world) return;
@@ -161,7 +205,7 @@ void StartCooldownForTribe(int team) {
         auto* base_pc = weak_pc.Get();
         if (!base_pc || !base_pc->IsA(AShooterPlayerController::GetPrivateStaticClass())) continue;
         auto* pc = static_cast<AShooterPlayerController*>(base_pc);
-        if (ArkApi::GetApiUtils().GetTribeID(pc) == team) StartCooldown(pc);
+        if (ArkApi::GetApiUtils().GetTribeID(pc) == team) StartCooldown(pc, seconds, reason);
     }
 }
 
@@ -173,11 +217,11 @@ int RemainingSeconds(AShooterPlayerController* pc) {
     if (it == g_cooldowns.end()) return 0;
 
     const auto now = std::chrono::steady_clock::now();
-    if (now >= it->second) {
+    if (now >= it->second.expiry) {
         g_cooldowns.erase(it);
         return 0;
     }
-    return static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(it->second - now).count()) + 1;
+    return static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(it->second.expiry - now).count()) + 1;
 }
 
 bool IsOnCooldown(AShooterPlayerController* pc) { return RemainingSeconds(pc) > 0; }
@@ -214,26 +258,47 @@ void SendReminders(const std::chrono::steady_clock::time_point& now) {
 DECLARE_HOOK(APrimalCharacter_TakeDamage, float, APrimalCharacter*, float, FDamageEvent*, AController*, AActor*);
 DECLARE_HOOK(APrimalStructure_TakeDamage, float, APrimalStructure*, float, FDamageEvent*, AController*, AActor*);
 
-void HandleEnemyDamage(int victim_team, AController* event_instigator, AActor* damage_causer, float applied_damage) {
+void HandleEnemyDamage(int victim_team, AController* event_instigator, AActor* damage_causer,
+                       float applied_damage, int seconds, const std::string& reason) {
     if (applied_damage < g_config.min_damage_to_trigger || !IsPlayerOwnedTeam(victim_team)) return;
     const AttackerInfo attacker = ResolveAttacker(event_instigator, damage_causer);
     if (!IsPlayerOwnedTeam(attacker.team) || attacker.team == victim_team) return;
 
     // Tag every online member of both tribes. This makes structure/turret
     // raids work even when the actual damage causer has no player controller.
-    StartCooldownForTribe(victim_team);
-    StartCooldownForTribe(attacker.team);
-    if (attacker.player) StartCooldown(attacker.player);
+    StartCooldownForTribe(victim_team, seconds, reason);
+    StartCooldownForTribe(attacker.team, seconds, reason);
+    if (attacker.player) StartCooldown(attacker.player, seconds, reason);
 }
 
 float Hook_APrimalCharacter_TakeDamage(APrimalCharacter* _this, float damage, FDamageEvent* damage_event,
                                         AController* event_instigator, AActor* damage_causer) {
     const int victim_team = _this ? _this->TargetingTeamField() : -1;
+    const bool was_dead = !_this || _this->IsDead();
+    const bool is_player = _this && _this->IsA(AShooterCharacter::GetPrivateStaticClass());
+    const bool is_tame = _this && _this->IsA(APrimalDinoCharacter::GetPrivateStaticClass()) &&
+        static_cast<APrimalDinoCharacter*>(_this)->BPIsTamed();
 
     const float result =
         APrimalCharacter_TakeDamage_original(_this, damage, damage_event, event_instigator, damage_causer);
 
-    HandleEnemyDamage(victim_team, event_instigator, damage_causer, result);
+    const bool killed = _this && !was_dead && _this->IsDead();
+    int seconds = is_player ? g_config.player_damage_seconds : g_config.tame_damage_seconds;
+    std::string reason = is_player ? "player damage" : "tame damage";
+    if (killed) {
+        if (IsTurretDamage(event_instigator, damage_causer)) {
+            seconds = g_config.turret_kill_seconds;
+            reason = "turret kill";
+        } else if (is_player) {
+            seconds = g_config.player_kill_seconds;
+            reason = "player killed";
+        } else if (is_tame) {
+            seconds = g_config.tame_kill_seconds;
+            reason = "tame killed";
+        }
+    }
+    if (is_player || is_tame)
+        HandleEnemyDamage(victim_team, event_instigator, damage_causer, result, seconds, reason);
 
     return result;
 }
@@ -241,10 +306,15 @@ float Hook_APrimalCharacter_TakeDamage(APrimalCharacter* _this, float damage, FD
 float Hook_APrimalStructure_TakeDamage(APrimalStructure* _this, float damage, FDamageEvent* damage_event,
                                         AController* event_instigator, AActor* damage_causer) {
     const int victim_team = _this ? _this->TargetingTeamField() : -1;
+    const bool was_dead = !_this || _this->IsDead();
     const float result =
         APrimalStructure_TakeDamage_original(_this, damage, damage_event, event_instigator, damage_causer);
 
-    HandleEnemyDamage(victim_team, event_instigator, damage_causer, result);
+    const bool destroyed = _this && !was_dead && _this->IsDead();
+    HandleEnemyDamage(
+        victim_team, event_instigator, damage_causer, result,
+        destroyed ? g_config.structure_destroyed_seconds : g_config.structure_damage_seconds,
+        destroyed ? "structure destroyed" : "structure damage");
 
     return result;
 }
@@ -344,7 +414,7 @@ void UpkeepTimer() {
 
     const auto now = std::chrono::steady_clock::now();
     for (auto it = g_cooldowns.begin(); it != g_cooldowns.end();) {
-        it = (now >= it->second) ? g_cooldowns.erase(it) : std::next(it);
+        it = (now >= it->second.expiry) ? g_cooldowns.erase(it) : std::next(it);
     }
 
     UWorld* world = ArkApi::GetApiUtils().GetWorld();
@@ -370,10 +440,18 @@ void SelfCheckCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Typ
         : g_config.self_check_none);
 }
 
-void TestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type) {
+void TestCommand(AShooterPlayerController* pc, FString* message, EChatSendMode::Type) {
     if (!pc) return;
-    StartCooldown(pc);
-    Send(pc, "PvPCooldowns v1.2 test started. Use /pvpcd to inspect the timer.");
+    int seconds = g_config.test_seconds;
+    if (message) {
+        std::istringstream input(message->ToString());
+        std::string command;
+        int requested = 0;
+        input >> command >> requested;
+        if (requested > 0 && requested <= 3600) seconds = requested;
+    }
+    StartCooldown(pc, seconds, "manual test");
+    Send(pc, "PvPCooldowns v1.3 test started. Use /pvpcd to inspect the timer.");
 }
 
 void IconTestCommand(AShooterPlayerController* pc, FString* message, EChatSendMode::Type) {
@@ -400,7 +478,6 @@ std::string ConfigPath() {
 
 Config ParseConfig(const minijson::Value& root) {
     Config c;
-    c.cooldown_seconds = minijson::integer(root, "General", "CooldownSeconds", c.cooldown_seconds);
     c.min_damage_to_trigger = minijson::number(root, "General", "MinDamageToTrigger", c.min_damage_to_trigger);
     c.show_messages = minijson::boolean(root, "General", "ShowMessages", c.show_messages);
     c.self_check_command = minijson::str(root, "General", "SelfCheckCommand", c.self_check_command);
@@ -408,6 +485,14 @@ Config ParseConfig(const minijson::Value& root) {
     c.icon_test_command = minijson::str(root, "General", "IconTestCommand", c.icon_test_command);
     c.reminder_interval_seconds = minijson::integer(root, "General", "ReminderIntervalSeconds", c.reminder_interval_seconds);
     c.min_tribe_team_id = minijson::integer(root, "General", "MinTribeTeamId", c.min_tribe_team_id);
+    c.player_damage_seconds = minijson::integer(root, "Durations", "PlayerDamageSeconds", c.player_damage_seconds);
+    c.tame_damage_seconds = minijson::integer(root, "Durations", "TameDamageSeconds", c.tame_damage_seconds);
+    c.structure_damage_seconds = minijson::integer(root, "Durations", "StructureDamageSeconds", c.structure_damage_seconds);
+    c.player_kill_seconds = minijson::integer(root, "Durations", "PlayerKillSeconds", c.player_kill_seconds);
+    c.tame_kill_seconds = minijson::integer(root, "Durations", "TameKillSeconds", c.tame_kill_seconds);
+    c.structure_destroyed_seconds = minijson::integer(root, "Durations", "StructureDestroyedSeconds", c.structure_destroyed_seconds);
+    c.turret_kill_seconds = minijson::integer(root, "Durations", "TurretKillSeconds", c.turret_kill_seconds);
+    c.test_seconds = minijson::integer(root, "Durations", "TestSeconds", c.test_seconds);
     c.hud_notification_enabled = minijson::boolean(root, "HudNotification", "Enabled", c.hud_notification_enabled);
     c.hud_display_scale = minijson::number(root, "HudNotification", "DisplayScale", c.hud_display_scale);
     c.hud_display_time = minijson::number(root, "HudNotification", "DisplayTime", c.hud_display_time);
@@ -416,13 +501,21 @@ Config ParseConfig(const minijson::Value& root) {
     c.hud_buff_blueprint = minijson::str(root, "HudBuff", "BlueprintPath", c.hud_buff_blueprint);
 
     c.cooldown_started = minijson::str(root, "Messages", "CooldownStarted", c.cooldown_started);
+    c.cooldown_escalated = minijson::str(root, "Messages", "CooldownEscalated", c.cooldown_escalated);
     c.self_check_on_cooldown = minijson::str(root, "Messages", "SelfCheckOnCooldown", c.self_check_on_cooldown);
     c.self_check_none = minijson::str(root, "Messages", "SelfCheckNone", c.self_check_none);
     c.reminder = minijson::str(root, "Messages", "Reminder", c.reminder);
 
-    c.cooldown_seconds = std::max(1, c.cooldown_seconds);
     c.min_damage_to_trigger = std::max(0.0f, c.min_damage_to_trigger);
     c.min_tribe_team_id = std::max(1, c.min_tribe_team_id);
+    c.player_damage_seconds = std::max(1, c.player_damage_seconds);
+    c.tame_damage_seconds = std::max(1, c.tame_damage_seconds);
+    c.structure_damage_seconds = std::max(1, c.structure_damage_seconds);
+    c.player_kill_seconds = std::max(1, c.player_kill_seconds);
+    c.tame_kill_seconds = std::max(1, c.tame_kill_seconds);
+    c.structure_destroyed_seconds = std::max(1, c.structure_destroyed_seconds);
+    c.turret_kill_seconds = std::max(1, c.turret_kill_seconds);
+    c.test_seconds = std::max(1, c.test_seconds);
     return c;
 }
 
@@ -440,7 +533,7 @@ void ReadConfig() {
 
 void Load() {
     Log::Get().Init("PvPCooldowns");
-    Log::GetLog()->info("Loading plugin - PvPCooldowns v1.2 RaidCombat");
+    Log::GetLog()->info("Loading plugin - PvPCooldowns v1.3 TieredRaidCombat");
 
     try {
         PvPCooldowns::ReadConfig();

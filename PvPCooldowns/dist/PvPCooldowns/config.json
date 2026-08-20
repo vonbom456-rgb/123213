@@ -1,6 +1,5 @@
 {
   "General": {
-    "CooldownSeconds": 45,
     "MinDamageToTrigger": 1.0,
     "ShowMessages": true,
     "SelfCheckCommand": "/pvpcd",
@@ -8,6 +7,16 @@
     "IconTestCommand": "/pvpcdicon",
     "ReminderIntervalSeconds": 5,
     "MinTribeTeamId": 50000
+  },
+  "Durations": {
+    "PlayerDamageSeconds": 80,
+    "TameDamageSeconds": 80,
+    "StructureDamageSeconds": 300,
+    "PlayerKillSeconds": 300,
+    "TameKillSeconds": 300,
+    "StructureDestroyedSeconds": 300,
+    "TurretKillSeconds": 300,
+    "TestSeconds": 80
   },
   "HudNotification": {
     "Enabled": true,
@@ -20,7 +29,8 @@
     "BlueprintPath": ""
   },
   "Messages": {
-    "CooldownStarted": "RAID / PVP started: {0}s. /fill and protected commands are blocked.",
+    "CooldownStarted": "RAID / PVP: {0}s ({1}). /fill and protected commands are blocked.",
+    "CooldownEscalated": "RAID / PVP escalated to {0}s ({1}).",
     "SelfCheckOnCooldown": "RAID / PVP: {0}s remaining.",
     "SelfCheckNone": "RAID / PVP timer is not active.",
     "Reminder": "RAID / PVP: {0}s remaining."
