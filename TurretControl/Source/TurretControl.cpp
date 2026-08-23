@@ -35,9 +35,9 @@ struct Config {
     bool require_same_tribe = true;
     bool allow_during_pvp_cooldown = false;
     bool show_messages = true;
-    bool inventory_cap_enabled = false;
-    bool hard_cap_enabled = false;
-    int hard_cap_interval_seconds = 2;
+    bool inventory_cap_enabled = true;
+    bool hard_cap_enabled = true;
+    int hard_cap_interval_seconds = 1;
     float hard_cap_scan_radius = 5000.0f;
     int startup_delay_seconds = 60;
 
@@ -98,6 +98,7 @@ std::string g_registered_turrets_command;
 std::vector<UClass*> g_custom_heavy;
 std::vector<UClass*> g_custom_tek;
 std::vector<UClass*> g_custom_auto;
+bool g_internal_cap_bypass = false;
 
 using PvpCooldownChecker = bool(__fastcall*)(AShooterPlayerController*);
 PvpCooldownChecker g_pvp_checker = nullptr;
@@ -109,6 +110,21 @@ DECLARE_HOOK(UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity,
     UPrimalItem*,
     const int*,
     int*);
+
+DECLARE_HOOK(UPrimalInventoryComponent_AllowAddInventoryItem,
+    bool,
+    UPrimalInventoryComponent*,
+    UPrimalItem*,
+    int*,
+    bool);
+
+DECLARE_HOOK(UPrimalInventoryComponent_RemoteInventoryAllowAddItems,
+    bool,
+    UPrimalInventoryComponent*,
+    AShooterPlayerController*,
+    UPrimalItem*,
+    int*,
+    bool);
 
 std::string ConfigPath() {
     return ArkApi::Tools::GetCurrentDir() + "/ArkApi/Plugins/TurretControl/config.json";
@@ -367,7 +383,8 @@ int RemoveFamilyOverflow(UPrimalInventoryComponent* inventory, TurretKind kind, 
 // Returns how much was actually restored; anything short of the original
 // removed amount is logged (e.g. the target inventory/weight was full).
 int RefundRemovedStacks(UPrimalInventoryComponent* to_inventory, TurretKind kind,
-                         const std::vector<RemovedStack>& removed_stacks) {
+                         const std::vector<RemovedStack>& removed_stacks,
+                         UPrimalInventoryComponent* restore_inventory = nullptr) {
     if (!to_inventory) return 0;
     int refunded_total = 0;
     for (const auto& stack : removed_stacks) {
@@ -375,9 +392,15 @@ int RefundRemovedStacks(UPrimalInventoryComponent* to_inventory, TurretKind kind
         const int added = AddExact(to_inventory, stack.item_class, kind, stack.quantity);
         refunded_total += added;
         if (added < stack.quantity) {
+            int restored = 0;
+            if (restore_inventory) {
+                g_internal_cap_bypass = true;
+                restored = AddExact(restore_inventory, stack.item_class, kind, stack.quantity - added);
+                g_internal_cap_bypass = false;
+            }
             Log::GetLog()->warn(
-                "TurretControl overflow refund partial: class='{}' expected={} refunded={}",
-                GetClassFullName(stack.item_class), stack.quantity, added);
+                "TurretControl overflow refund partial: class='{}' expected={} refunded={} restored={}",
+                GetClassFullName(stack.item_class), stack.quantity, added, restored);
         }
     }
     return refunded_total;
@@ -414,14 +437,14 @@ int TransferFamily(UPrimalInventoryComponent* from, UPrimalInventoryComponent* t
             const int refunded = AddExact(from, actual_class, kind, refund);
             if (refunded != refund) {
                 Log::GetLog()->error(
-                    "TurretControl v1.6: refund failed. class='{}' expected={} refunded={}",
+                    "TurretControl v1.7: refund failed. class='{}' expected={} refunded={}",
                     GetClassFullName(actual_class), refund, refunded);
             }
         }
 
         const int turret_after = FamilyQuantity(to, kind);
         Log::GetLog()->info(
-            "TurretControl v1.6 fill: turret='{}' template='{}' player_class='{}' player_before={} turret_before={} requested={} removed={} added={} turret_after={}",
+            "TurretControl v1.7 fill: turret='{}' template='{}' player_class='{}' player_before={} turret_before={} requested={} removed={} added={} turret_after={}",
             GetClassFullName(turret),
             GetClassFullName(turret->AmmoItemTemplateField().uClass),
             GetClassFullName(actual_class),
@@ -659,14 +682,14 @@ void FillCommandImpl(AShooterPlayerController* pc, FString*, EChatSendMode::Type
             else arb_used -= std::min(arb_used, refunded);
 
             Log::GetLog()->warn(
-                "TurretControl v1.6 /fill safety cap: turret='{}' kind={} before={} after={} limit={} overflow_removed={} refunded_to_player={}",
+                "TurretControl v1.7 /fill safety cap: turret='{}' kind={} before={} after={} limit={} overflow_removed={} refunded_to_player={}",
                 GetClassFullName(ref.turret), static_cast<int>(ref.kind), live_before, after, limit, removed, refunded);
         }
     }
 
     if (filled_turrets <= 0) {
         Log::GetLog()->warn(
-            "TurretControl v1.6: /fill found {} valid turrets but transferred nothing. ARB={} Shards={}",
+            "TurretControl v1.7: /fill found {} valid turrets but transferred nothing. ARB={} Shards={}",
             turrets.size(), arb_available, shards_available);
         Send(pc, g_config.fill_failed);
         return;
@@ -764,6 +787,54 @@ APrimalStructureTurret* GetTurretOwner(UPrimalInventoryComponent* inventory) {
     return static_cast<APrimalStructureTurret*>(owner);
 }
 
+bool ClampTurretAddQuantity(UPrimalInventoryComponent* inventory, UPrimalItem* item,
+                            int* requested_quantity, bool require_all) {
+    if (g_internal_cap_bypass || !g_config.inventory_cap_enabled || !inventory || !item) return true;
+
+    APrimalStructureTurret* turret = GetTurretOwner(inventory);
+    if (!turret || !IsValidTurret(turret)) return true;
+
+    const TurretKind kind = DetectTurretKind(turret);
+    if (kind == TurretKind::Unsupported || !ItemMatchesKind(item, kind)) return true;
+
+    const int limit = LimitFor(kind);
+    const int current = FamilyQuantity(inventory, kind);
+    const int remaining = std::max(0, limit - current);
+    const int item_quantity = std::max(0, item->GetItemQuantity());
+    const int requested = requested_quantity && *requested_quantity > 0
+        ? *requested_quantity
+        : item_quantity;
+    const int allowed = std::min(requested, remaining);
+
+    if (requested_quantity) *requested_quantity = allowed;
+
+    Log::GetLog()->info(
+        "TurretControl v1.7 manual cap: turret='{}' item='{}' current={} limit={} requested={} allowed={}",
+        GetClassFullName(turret), GetClassFullName(item), current, limit, requested, allowed);
+
+    if (allowed <= 0) return false;
+    if (require_all && allowed < requested) return false;
+    return true;
+}
+
+bool Hook_UPrimalInventoryComponent_AllowAddInventoryItem(
+    UPrimalInventoryComponent* inventory, UPrimalItem* item,
+    int* requested_quantity, bool only_add_all)
+{
+    if (!ClampTurretAddQuantity(inventory, item, requested_quantity, only_add_all)) return false;
+    return UPrimalInventoryComponent_AllowAddInventoryItem_original(
+        inventory, item, requested_quantity, only_add_all);
+}
+
+bool Hook_UPrimalInventoryComponent_RemoteInventoryAllowAddItems(
+    UPrimalInventoryComponent* inventory, AShooterPlayerController* pc,
+    UPrimalItem* item, int* quantity_override, bool requested_by_player)
+{
+    if (!ClampTurretAddQuantity(inventory, item, quantity_override, false)) return false;
+    return UPrimalInventoryComponent_RemoteInventoryAllowAddItems_original(
+        inventory, pc, item, quantity_override, requested_by_player);
+}
+
 bool Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity(
     UPrimalInventoryComponent* inventory,
     UPrimalItem* item,
@@ -774,7 +845,7 @@ bool Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity(
         UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity_original(
             inventory, item, requested_quantity_in, requested_quantity_out);
 
-    if (!original_allowed || !g_config.inventory_cap_enabled || !inventory || !item)
+    if (g_internal_cap_bypass || !original_allowed || !g_config.inventory_cap_enabled || !inventory || !item)
         return original_allowed;
 
     APrimalStructureTurret* turret = GetTurretOwner(inventory);
@@ -799,7 +870,7 @@ bool Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity(
         *requested_quantity_out = allowed;
 
     Log::GetLog()->debug(
-        "TurretControl v1.6 inventory cap: turret='{}' item='{}' current={} limit={} requested={} original_allowed={} final_allowed={}",
+        "TurretControl v1.7 inventory cap: turret='{}' item='{}' current={} limit={} requested={} original_allowed={} final_allowed={}",
         GetClassFullName(turret),
         GetClassFullName(item),
         current,
@@ -812,22 +883,56 @@ bool Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity(
     return allowed > 0;
 }
 
-bool g_inventory_hook_installed = false;
+bool g_inventory_max_hook_installed = false;
+bool g_inventory_add_hook_installed = false;
+bool g_inventory_remote_hook_installed = false;
 
 void ApplyInventoryHookState() {
-    if (g_config.inventory_cap_enabled && !g_inventory_hook_installed) {
-        g_inventory_hook_installed = ArkApi::GetHooks().SetHook(
+    if (g_config.inventory_cap_enabled && !g_inventory_max_hook_installed) {
+        g_inventory_max_hook_installed = ArkApi::GetHooks().SetHook(
             "UPrimalInventoryComponent.AllowAddInventoryItem_MaxQuantity",
             &Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity,
             &UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity_original);
-        if (!g_inventory_hook_installed) {
-            Log::GetLog()->error("TurretControl: inventory-cap hook installation failed; continuing without InventoryCap");
+        if (!g_inventory_max_hook_installed) {
+            Log::GetLog()->error("TurretControl: max-quantity inventory-cap hook installation failed");
         }
-    } else if (!g_config.inventory_cap_enabled && g_inventory_hook_installed) {
+    }
+    if (g_config.inventory_cap_enabled && !g_inventory_add_hook_installed) {
+        g_inventory_add_hook_installed = ArkApi::GetHooks().SetHook(
+            "UPrimalInventoryComponent.AllowAddInventoryItem",
+            &Hook_UPrimalInventoryComponent_AllowAddInventoryItem,
+            &UPrimalInventoryComponent_AllowAddInventoryItem_original);
+        if (!g_inventory_add_hook_installed) {
+            Log::GetLog()->error("TurretControl: generic inventory-cap hook installation failed");
+        }
+    }
+    if (g_config.inventory_cap_enabled && !g_inventory_remote_hook_installed) {
+        g_inventory_remote_hook_installed = ArkApi::GetHooks().SetHook(
+            "UPrimalInventoryComponent.RemoteInventoryAllowAddItems",
+            &Hook_UPrimalInventoryComponent_RemoteInventoryAllowAddItems,
+            &UPrimalInventoryComponent_RemoteInventoryAllowAddItems_original);
+        if (!g_inventory_remote_hook_installed) {
+            Log::GetLog()->error("TurretControl: remote inventory-cap hook installation failed");
+        }
+    }
+
+    if (!g_config.inventory_cap_enabled && g_inventory_max_hook_installed) {
         ArkApi::GetHooks().DisableHook(
             "UPrimalInventoryComponent.AllowAddInventoryItem_MaxQuantity",
             &Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity);
-        g_inventory_hook_installed = false;
+        g_inventory_max_hook_installed = false;
+    }
+    if (!g_config.inventory_cap_enabled && g_inventory_add_hook_installed) {
+        ArkApi::GetHooks().DisableHook(
+            "UPrimalInventoryComponent.AllowAddInventoryItem",
+            &Hook_UPrimalInventoryComponent_AllowAddInventoryItem);
+        g_inventory_add_hook_installed = false;
+    }
+    if (!g_config.inventory_cap_enabled && g_inventory_remote_hook_installed) {
+        ArkApi::GetHooks().DisableHook(
+            "UPrimalInventoryComponent.RemoteInventoryAllowAddItems",
+            &Hook_UPrimalInventoryComponent_RemoteInventoryAllowAddItems);
+        g_inventory_remote_hook_installed = false;
     }
 }
 
@@ -903,12 +1008,6 @@ void HardCapTimer() {
             const int current = FamilyQuantity(inventory, kind);
             if (current <= limit) continue;
 
-            const int overflow = current - limit;
-            std::vector<RemovedStack> removed_stacks;
-            const int removed = RemoveFamilyOverflow(inventory, kind, overflow, &removed_stacks);
-            turret->UpdateNumBullets();
-
-            int refunded = 0;
             const int turret_team = turret->TargetingTeamField();
             RefundTarget* refund_target = nullptr;
             float nearest_distance = g_config.hard_cap_scan_radius;
@@ -923,16 +1022,26 @@ void HardCapTimer() {
                     }
                 }
             }
-            if (refund_target) {
-                refunded = RefundRemovedStacks(refund_target->inventory, kind, removed_stacks);
-                if (refunded > 0) {
-                    Send(refund_target->pc,
-                        ReplaceToken(g_config.hard_cap_refund, "{0}", std::to_string(refunded)));
-                }
+
+            // Never remove overflow unless a same-tribe player is close enough
+            // to receive it. This prevents enemy scans and offline enforcement
+            // from deleting another tribe's ammunition.
+            if (!refund_target) continue;
+
+            const int overflow = current - limit;
+            std::vector<RemovedStack> removed_stacks;
+            const int removed = RemoveFamilyOverflow(inventory, kind, overflow, &removed_stacks);
+            const int refunded = RefundRemovedStacks(
+                refund_target->inventory, kind, removed_stacks, inventory);
+            turret->UpdateNumBullets();
+
+            if (refunded > 0) {
+                Send(refund_target->pc,
+                    ReplaceToken(g_config.hard_cap_refund, "{0}", std::to_string(refunded)));
             }
 
             Log::GetLog()->warn(
-                "TurretControl v1.6 hard cap: turret='{}' kind={} current={} limit={} overflow={} removed={} refunded={}",
+                "TurretControl v1.7 safe hard cap: turret='{}' kind={} current={} limit={} overflow={} removed={} refunded={}",
                 GetClassFullName(turret), static_cast<int>(kind), current, limit, overflow, removed, refunded);
         }
     }
@@ -960,7 +1069,7 @@ void RuntimeTimer() {
         g_runtime_ready = true;
         ApplyInventoryHookState();
         Log::GetLog()->info(
-            "TurretControl v1.6 runtime enabled after world startup (InventoryCap={}, HardCap={})",
+            "TurretControl v1.7 runtime enabled after world startup (InventoryCap={}, HardCap={})",
             g_config.inventory_cap_enabled, g_config.hard_cap_enabled);
     }
 
@@ -1131,18 +1240,30 @@ void Load() {
     g_next_hard_cap_check = std::chrono::steady_clock::now();
     g_world_ready_seen = false;
     g_runtime_ready = false;
-    g_inventory_hook_installed = false;
+    g_inventory_max_hook_installed = false;
+    g_inventory_add_hook_installed = false;
+    g_inventory_remote_hook_installed = false;
     ArkApi::GetCommands().AddOnTimerCallback("TurretControl.Runtime", &RuntimeTimer);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.Reload", &ReloadCommand);
-    Log::GetLog()->info("Loaded plugin - TurretControl v1.6 FillHudNotification");
+    Log::GetLog()->info("Loaded plugin - TurretControl v1.7 ManualStackCap");
 }
 
 void Unload() {
     UnregisterChatCommands();
-    if (g_inventory_hook_installed) {
+    if (g_inventory_max_hook_installed) {
         ArkApi::GetHooks().DisableHook("UPrimalInventoryComponent.AllowAddInventoryItem_MaxQuantity",
             &Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity);
-        g_inventory_hook_installed = false;
+        g_inventory_max_hook_installed = false;
+    }
+    if (g_inventory_add_hook_installed) {
+        ArkApi::GetHooks().DisableHook("UPrimalInventoryComponent.AllowAddInventoryItem",
+            &Hook_UPrimalInventoryComponent_AllowAddInventoryItem);
+        g_inventory_add_hook_installed = false;
+    }
+    if (g_inventory_remote_hook_installed) {
+        ArkApi::GetHooks().DisableHook("UPrimalInventoryComponent.RemoteInventoryAllowAddItems",
+            &Hook_UPrimalInventoryComponent_RemoteInventoryAllowAddItems);
+        g_inventory_remote_hook_installed = false;
     }
     ArkApi::GetCommands().RemoveOnTimerCallback("TurretControl.Runtime");
     ArkApi::GetCommands().RemoveConsoleCommand("TurretControl.Reload");

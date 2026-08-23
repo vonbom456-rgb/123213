@@ -1,19 +1,16 @@
-# TurretControl 1.5 — ASE ArkApi 3.56
+# TurretControl 1.7 — ASE ArkApi 3.56
 
 `TurretControl` is a server-side plugin for **ARK: Survival Evolved (ASE)**. It is not an ASA/CurseForge mod.
 
 ## Safe startup defaults
 
-`HardCapEnabled` and `InventoryCapEnabled` are disabled by default. The global
-inventory hook is not installed at all while InventoryCap is disabled. When a
-cap is explicitly enabled, runtime work waits for a valid GameMode/GameState
+`HardCapEnabled` and `InventoryCapEnabled` are enabled by default. Runtime work
+waits for a valid GameMode/GameState
 and then an additional `StartupDelaySeconds` (default 60), so ARK can restore
 the save before the plugin scans or hooks turret inventories.
 
-Enable `HardCapEnabled` first after confirming a clean startup.
-`InventoryCapEnabled` should be treated as experimental because other server
-plugins can hook the same global inventory function. The periodic hard cap is
-the safer enforcement mode.
+The inventory cap covers the normal, quantity-check and remote inventory paths.
+The periodic hard cap is a second safety layer for modded inventory paths.
 
 Target environment:
 
@@ -105,13 +102,13 @@ the ammunition used. It uses the built-in structures icon and needs no mod.
 
 ## Inventory cap enforcement
 
-`InventoryCapEnabled` (default `true`) hooks the game's own `AllowAddInventoryItem_MaxQuantity` check on supported turret inventories. This means a turret **cannot physically hold more than its configured limit** through *any* manual path — drag-and-drop, "transfer all", crafting straight into the turret, etc. The game clamps the amount actually added and leaves the remainder in the source inventory; nothing is removed or lost at this stage.
+`InventoryCapEnabled` (default `true`) hooks the game's normal, quantity-check and remote add paths on supported turret inventories. This blocks drag-and-drop and remote transfers above the configured limit.
 
-`HardCapEnabled` (default `true`) is a periodic backup sweep (every `HardCapIntervalSeconds`, default 2s) that re-checks turrets near online players and trims anything still above the limit. This only matters for cases that bypass the live hook (e.g. console/admin item commands, imported save data, or a limit that was lowered via `TurretControl.Reload` after turrets were already filled past the new cap). When the sweep has to trim overflow it now tries to hand that ammo back:
+`HardCapEnabled` (default `true`) is a periodic backup sweep (every `HardCapIntervalSeconds`, default 1s) that re-checks turrets near online players and trims anything still above the limit. This covers modded paths that bypass the live hooks. When the sweep has to trim overflow it hands that ammo back safely:
 
 - it builds the same-tribe recipient list before scanning, so an enemy player encountered first cannot suppress a rightful refund;
 - it refunds into the inventory of a nearby online player, but **only** if that player belongs to the same tribe as the turret;
-- if no eligible tribe member is nearby at the moment the sweep runs, the overflow can't be handed to anyone and is removed (there is no way to identify who originally placed it after the fact).
+- if no eligible tribe member is nearby, the turret is left unchanged; ammo is never deleted merely because an enemy or no owner is nearby.
 
 In short: normal manual placement is blocked outright once a turret is at its cap, and the rare backup-sweep case now returns the ammo whenever a rightful owner is present to receive it.
 

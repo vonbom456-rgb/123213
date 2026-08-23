@@ -340,6 +340,7 @@ void FlushTimer() {
 
 DECLARE_HOOK(APrimalCharacter_TakeDamage, float, APrimalCharacter*, float, FDamageEvent*, AController*, AActor*);
 DECLARE_HOOK(APrimalStructure_TakeDamage, float, APrimalStructure*, float, FDamageEvent*, AController*, AActor*);
+DECLARE_HOOK(APrimalTargetableActor_AdjustDamage, void, APrimalTargetableActor*, float*, FDamageEvent*, AController*, AActor*);
 
 float Hook_APrimalCharacter_TakeDamage(APrimalCharacter* _this, float damage, FDamageEvent* damage_event,
                                         AController* event_instigator, AActor* damage_causer) {
@@ -358,8 +359,6 @@ float Hook_APrimalCharacter_TakeDamage(APrimalCharacter* _this, float damage, FD
 
 float Hook_APrimalStructure_TakeDamage(APrimalStructure* _this, float damage, FDamageEvent* damage_event,
                                         AController* event_instigator, AActor* damage_causer) {
-    const int target_team = _this ? _this->TargetingTeamField() : -1;
-    damage = ApplyCombatBalance(damage, true, target_team, event_instigator, damage_causer);
     const float result =
         APrimalStructure_TakeDamage_original(_this, damage, damage_event, event_instigator, damage_causer);
 
@@ -368,6 +367,25 @@ float Hook_APrimalStructure_TakeDamage(APrimalStructure* _this, float damage, FD
         RecordDamage(_this, event_instigator, damage_causer, result, Category::Structure);
     }
     return result;
+}
+
+void Hook_APrimalTargetableActor_AdjustDamage(APrimalTargetableActor* _this, float* damage,
+                                               FDamageEvent* damage_event,
+                                               AController* event_instigator,
+                                               AActor* damage_causer) {
+    // Let ARK and the structure (including modded S+/Tek structures) finish
+    // their normal weapon/material calculations first. Applying the cap in
+    // TakeDamage was too early: ARK could multiply the already capped 500
+    // afterwards and a live Tek foundation received 4620.
+    APrimalTargetableActor_AdjustDamage_original(
+        _this, damage, damage_event, event_instigator, damage_causer);
+
+    if (!_this || !damage || *damage <= 0.0f ||
+        !_this->IsA(APrimalStructure::GetPrivateStaticClass())) return;
+
+    const int target_team = _this->TargetingTeamField();
+    *damage = ApplyCombatBalance(
+        *damage, true, target_team, event_instigator, damage_causer);
 }
 
 // --- Config ---
@@ -448,7 +466,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
     }
 
     std::ostringstream status;
-    status << "DamageNumbers v1.9 CombatBalance OK | native="
+    status << "DamageNumbers v2.0 FinalDamageCap OK | native="
            << (g_native_floating_applied ? "ON" : "WAIT")
            << " | character_hits=" << g_character_damage_events
            << " | structure_hits=" << g_structure_damage_events
@@ -460,7 +478,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 
 void Load() {
     Log::Get().Init("DamageNumbers");
-    Log::GetLog()->info("Loading plugin - DamageNumbers v1.9 CombatBalance");
+    Log::GetLog()->info("Loading plugin - DamageNumbers v2.0 FinalDamageCap");
 
     try {
         DamageAlerts::ReadConfig();
@@ -475,6 +493,9 @@ void Load() {
     ArkApi::GetHooks().SetHook("APrimalStructure.TakeDamage",
         &DamageAlerts::Hook_APrimalStructure_TakeDamage,
         &DamageAlerts::APrimalStructure_TakeDamage_original);
+    ArkApi::GetHooks().SetHook("APrimalTargetableActor.AdjustDamage",
+        &DamageAlerts::Hook_APrimalTargetableActor_AdjustDamage,
+        &DamageAlerts::APrimalTargetableActor_AdjustDamage_original);
 
     ArkApi::GetCommands().AddOnTimerCallback("DamageAlerts.Flush", &DamageAlerts::FlushTimer);
     if (!DamageAlerts::g_config.test_command.empty()) {
@@ -490,6 +511,8 @@ void Unload() {
     ArkApi::GetCommands().RemoveOnTimerCallback("DamageAlerts.Flush");
     ArkApi::GetHooks().DisableHook("APrimalCharacter.TakeDamage", &DamageAlerts::Hook_APrimalCharacter_TakeDamage);
     ArkApi::GetHooks().DisableHook("APrimalStructure.TakeDamage", &DamageAlerts::Hook_APrimalStructure_TakeDamage);
+    ArkApi::GetHooks().DisableHook("APrimalTargetableActor.AdjustDamage",
+        &DamageAlerts::Hook_APrimalTargetableActor_AdjustDamage);
     DamageAlerts::g_pending_attacker.clear();
     DamageAlerts::g_pending_victim.clear();
 }
