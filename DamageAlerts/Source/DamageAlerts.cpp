@@ -51,6 +51,7 @@ struct Config {
     std::string test_command = "/datest";
 
     bool combat_balance_enabled = true;
+    float enemy_structure_damage_multiplier = 0.5f;
     float tek_rifle_structure_damage_cap = 500.0f;
     float turret_character_damage_multiplier = 1.5f;
 
@@ -121,6 +122,8 @@ bool IsPlayerOwnedTeam(int team) {
     return team >= g_config.min_tribe_team_id;
 }
 
+AttackerInfo ResolveAttacker(AController* event_instigator, AActor* damage_causer);
+
 std::string ToLower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -176,9 +179,21 @@ float ApplyCombatBalance(float damage, bool structure_target, int target_team,
     if (!g_config.combat_balance_enabled || damage <= 0.0f) return damage;
 
     float adjusted = damage;
-    if (structure_target && IsTekRifleDamage(event_instigator, damage_causer)) {
-        const float cap = g_config.tek_rifle_structure_damage_cap;
-        if (cap > 0.0f) adjusted = std::min(adjusted, cap);
+    if (structure_target) {
+        const AttackerInfo attacker = ResolveAttacker(event_instigator, damage_causer);
+        const bool enemy_pvp_damage = IsPlayerOwnedTeam(target_team) &&
+            IsPlayerOwnedTeam(attacker.team) && attacker.team != target_team;
+        if (enemy_pvp_damage) {
+            adjusted *= std::max(0.0f, g_config.enemy_structure_damage_multiplier);
+        }
+
+        // Apply the weapon cap after the PvP multiplier, so a high raw Tek
+        // rifle hit is still capped at 500 outside caves. ARK may then apply
+        // its own location-specific multipliers (for example cave damage).
+        if (IsTekRifleDamage(event_instigator, damage_causer)) {
+            const float cap = g_config.tek_rifle_structure_damage_cap;
+            if (cap > 0.0f) adjusted = std::min(adjusted, cap);
+        }
     } else if (!structure_target && IsPlayerOwnedTeam(target_team) && IsTurretDamage(damage_causer)) {
         adjusted *= std::max(0.0f, g_config.turret_character_damage_multiplier);
     }
@@ -343,7 +358,8 @@ float Hook_APrimalCharacter_TakeDamage(APrimalCharacter* _this, float damage, FD
 
 float Hook_APrimalStructure_TakeDamage(APrimalStructure* _this, float damage, FDamageEvent* damage_event,
                                         AController* event_instigator, AActor* damage_causer) {
-    damage = ApplyCombatBalance(damage, true, -1, event_instigator, damage_causer);
+    const int target_team = _this ? _this->TargetingTeamField() : -1;
+    damage = ApplyCombatBalance(damage, true, target_team, event_instigator, damage_causer);
     const float result =
         APrimalStructure_TakeDamage_original(_this, damage, damage_event, event_instigator, damage_causer);
 
@@ -379,6 +395,8 @@ Config ParseConfig(const minijson::Value& root) {
     c.test_command = minijson::str(root, "Diagnostics", "TestCommand", c.test_command);
 
     c.combat_balance_enabled = minijson::boolean(root, "CombatBalance", "Enabled", c.combat_balance_enabled);
+    c.enemy_structure_damage_multiplier = minijson::number(
+        root, "CombatBalance", "EnemyStructureDamageMultiplier", c.enemy_structure_damage_multiplier);
     c.tek_rifle_structure_damage_cap = minijson::number(
         root, "CombatBalance", "TekRifleStructureDamageCap", c.tek_rifle_structure_damage_cap);
     c.turret_character_damage_multiplier = minijson::number(
@@ -389,6 +407,7 @@ Config ParseConfig(const minijson::Value& root) {
 
     c.flush_interval_seconds = std::max(1, c.flush_interval_seconds);
     c.min_tribe_team_id = std::max(1, c.min_tribe_team_id);
+    c.enemy_structure_damage_multiplier = std::max(0.0f, c.enemy_structure_damage_multiplier);
     c.tek_rifle_structure_damage_cap = std::max(0.0f, c.tek_rifle_structure_damage_cap);
     c.turret_character_damage_multiplier = std::max(0.0f, c.turret_character_damage_multiplier);
     return c;
@@ -429,7 +448,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
     }
 
     std::ostringstream status;
-    status << "DamageNumbers v1.8 CombatBalance OK | native="
+    status << "DamageNumbers v1.9 CombatBalance OK | native="
            << (g_native_floating_applied ? "ON" : "WAIT")
            << " | character_hits=" << g_character_damage_events
            << " | structure_hits=" << g_structure_damage_events
@@ -441,7 +460,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 
 void Load() {
     Log::Get().Init("DamageNumbers");
-    Log::GetLog()->info("Loading plugin - DamageNumbers v1.8 CombatBalance");
+    Log::GetLog()->info("Loading plugin - DamageNumbers v1.9 CombatBalance");
 
     try {
         DamageAlerts::ReadConfig();
