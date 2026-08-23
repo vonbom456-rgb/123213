@@ -19,6 +19,17 @@
     "UsePermissions": false,
     "DefaultPermission": "TurretControl.Default"
   },
+  "PvpPlacementCooldown": {
+    "Enabled": true,
+    "Seconds": 3,
+    "ClassNameTokens": [
+      "turret",
+      "plantspeciesx",
+      "forcefield",
+      "shield",
+      "generator"
+    ]
+  },
   "FillRadiusHologram": {
     "Enabled": true,
     "NativeDebugSphere": true,
@@ -60,7 +71,8 @@
     "FillSuccess": "Filled {0} turrets | ARB used: {1} | Shards used: {2}",
     "TurretSuccess": "Updated {0} turrets.",
     "TargetingUnconfigured": "Targeting command is disabled until TargetingValues are configured.",
-    "PvpBlocked": "You cannot use /fill during PvP cooldown.",
+    "PvpBlocked": "Turret controls and /fill are blocked during PvP cooldown.",
+    "PvpPlacementBlocked": "RAID / PVP: wait {0}s before placing another defensive structure.",
     "ReloadOk": "TurretControl config reloaded.",
     "ReloadFailed": "TurretControl config reload failed.",
     "FillFailed": "Fill failed. Check ArkApi log for TurretControl details.",

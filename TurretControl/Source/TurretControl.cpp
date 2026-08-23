@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <unordered_map>
 #include <unordered_set>
 #include <fstream>
@@ -40,6 +41,12 @@ struct Config {
     int hard_cap_interval_seconds = 1;
     float hard_cap_scan_radius = 5000.0f;
     int startup_delay_seconds = 60;
+
+    bool pvp_placement_cooldown_enabled = true;
+    float pvp_placement_cooldown_seconds = 3.0f;
+    std::vector<std::string> pvp_placement_class_tokens{
+        "turret", "plantspeciesx", "forcefield", "shield", "generator"
+    };
 
     bool use_permissions = false;
     std::string permission = "TurretControl.Default";
@@ -86,7 +93,8 @@ struct Config {
     std::string fill_failed = "Fill failed. Check ArkApi log for TurretControl details.";
     std::string turret_success = "Updated {0} turrets.";
     std::string targeting_unconfigured = "Targeting command is disabled until TargetingValues are configured.";
-    std::string pvp_blocked = "You cannot use /fill during PvP cooldown.";
+    std::string pvp_blocked = "Turret controls and /fill are blocked during PvP cooldown.";
+    std::string pvp_placement_blocked = "RAID / PVP: wait {0}s before placing another defensive structure.";
     std::string reload_ok = "TurretControl config reloaded.";
     std::string reload_failed = "TurretControl config reload failed.";
     std::string hard_cap_refund = "Turret ammo cap enforced: {0} overflow ammo returned to your inventory.";
@@ -102,6 +110,8 @@ bool g_internal_cap_bypass = false;
 
 using PvpCooldownChecker = bool(__fastcall*)(AShooterPlayerController*);
 PvpCooldownChecker g_pvp_checker = nullptr;
+
+std::unordered_map<uint64, std::chrono::steady_clock::time_point> g_last_pvp_defense_placement;
 
 
 DECLARE_HOOK(UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity,
@@ -125,6 +135,22 @@ DECLARE_HOOK(UPrimalInventoryComponent_RemoteInventoryAllowAddItems,
     UPrimalItem*,
     int*,
     bool);
+
+DECLARE_HOOK(APrimalStructure_IsAllowedToBuild,
+    int,
+    APrimalStructure*,
+    APlayerController*,
+    FVector,
+    FRotator,
+    FPlacementData*,
+    bool,
+    FRotator,
+    bool);
+
+DECLARE_HOOK(APrimalStructure_PlacedStructure,
+    void,
+    APrimalStructure*,
+    AShooterPlayerController*);
 
 std::string ConfigPath() {
     return ArkApi::Tools::GetCurrentDir() + "/ArkApi/Plugins/TurretControl/config.json";
@@ -578,6 +604,75 @@ bool IsPvpBlocked(AShooterPlayerController* pc) {
     return g_pvp_checker(pc);
 }
 
+uint64 PlayerCooldownKey(AShooterPlayerController* pc) {
+    if (!pc) return 0;
+    const uint64 steam_id = ArkApi::IApiUtils::GetSteamIdFromController(pc);
+    return steam_id != 0 ? steam_id : static_cast<uint64>(reinterpret_cast<uintptr_t>(pc));
+}
+
+bool IsPvpPlacementLimitedStructure(APrimalStructure* structure) {
+    if (!structure || !g_config.pvp_placement_cooldown_enabled) return false;
+    const std::string class_name = ToLower(GetClassFullName(structure));
+    for (const std::string& raw_token : g_config.pvp_placement_class_tokens) {
+        const std::string token = ToLower(raw_token);
+        if (!token.empty() && class_name.find(token) != std::string::npos) return true;
+    }
+    return false;
+}
+
+int Hook_APrimalStructure_IsAllowedToBuild(
+    APrimalStructure* structure, APlayerController* player_controller,
+    FVector at_location, FRotator at_rotation, FPlacementData* placement_data,
+    bool dont_adjust_for_max_range, FRotator player_view_rotation, bool final_placement)
+{
+    const int original_result = APrimalStructure_IsAllowedToBuild_original(
+        structure, player_controller, at_location, at_rotation, placement_data,
+        dont_adjust_for_max_range, player_view_rotation, final_placement);
+
+    // ARK uses zero for an allowed placement. Preserve every native/modded
+    // rejection, and only enforce the rate limit on the final server check.
+    if (original_result != 0 || !final_placement || !player_controller ||
+        !player_controller->IsA(AShooterPlayerController::GetPrivateStaticClass()) ||
+        !IsPvpPlacementLimitedStructure(structure)) {
+        return original_result;
+    }
+
+    auto* pc = static_cast<AShooterPlayerController*>(player_controller);
+    if (!IsPvpBlocked(pc)) return original_result;
+
+    const uint64 key = PlayerCooldownKey(pc);
+    const auto it = g_last_pvp_defense_placement.find(key);
+    if (key == 0 || it == g_last_pvp_defense_placement.end()) return original_result;
+
+    const auto now = std::chrono::steady_clock::now();
+    const float elapsed = std::chrono::duration<float>(now - it->second).count();
+    const float cooldown = std::max(0.0f, g_config.pvp_placement_cooldown_seconds);
+    if (elapsed >= cooldown) return original_result;
+
+    const int remaining = std::max(1, static_cast<int>(std::ceil(cooldown - elapsed)));
+    const std::string message = ReplaceToken(
+        g_config.pvp_placement_blocked, "{0}", std::to_string(remaining));
+    Send(pc, message);
+    ArkApi::GetApiUtils().SendNotification(
+        pc, FColorList::Yellow, 1.0f, 2.0f, pc->PingIcon_StructuresField(), *F(message));
+    return 1;
+}
+
+void Hook_APrimalStructure_PlacedStructure(
+    APrimalStructure* structure, AShooterPlayerController* pc)
+{
+    APrimalStructure_PlacedStructure_original(structure, pc);
+    if (!pc || !IsPvpBlocked(pc) || !IsPvpPlacementLimitedStructure(structure)) return;
+
+    const uint64 key = PlayerCooldownKey(pc);
+    if (key != 0) {
+        g_last_pvp_defense_placement[key] = std::chrono::steady_clock::now();
+        Log::GetLog()->info(
+            "TurretControl PvP placement cooldown started: player={} structure='{}' seconds={}",
+            key, GetClassFullName(structure), g_config.pvp_placement_cooldown_seconds);
+    }
+}
+
 // Purely cosmetic. The native debug sphere is a shipping-enabled ARK RPC and
 // has no collision or gameplay actor. Calling the multicast RPC on the player
 // controller confines it to that controller's owning client in normal network
@@ -706,6 +801,7 @@ void FillCommandImpl(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 void TurretsCommandImpl(AShooterPlayerController* pc, FString* message, EChatSendMode::Type) {
     if (!pc || !message || ArkApi::IApiUtils::IsPlayerDead(pc)) return;
     if (!HasPermission(pc)) { Send(pc, g_config.no_permission); return; }
+    if (IsPvpBlocked(pc)) { Send(pc, g_config.pvp_blocked); return; }
 
     std::istringstream command_stream(message->ToString());
     std::string command_word;
@@ -886,6 +982,42 @@ bool Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity(
 bool g_inventory_max_hook_installed = false;
 bool g_inventory_add_hook_installed = false;
 bool g_inventory_remote_hook_installed = false;
+bool g_placement_check_hook_installed = false;
+bool g_placed_structure_hook_installed = false;
+
+void InstallPlacementHooks() {
+    if (!g_placement_check_hook_installed) {
+        g_placement_check_hook_installed = ArkApi::GetHooks().SetHook(
+            "APrimalStructure.IsAllowedToBuild",
+            &Hook_APrimalStructure_IsAllowedToBuild,
+            &APrimalStructure_IsAllowedToBuild_original);
+        if (!g_placement_check_hook_installed) {
+            Log::GetLog()->error("TurretControl: PvP placement-check hook installation failed");
+        }
+    }
+    if (!g_placed_structure_hook_installed) {
+        g_placed_structure_hook_installed = ArkApi::GetHooks().SetHook(
+            "APrimalStructure.PlacedStructure",
+            &Hook_APrimalStructure_PlacedStructure,
+            &APrimalStructure_PlacedStructure_original);
+        if (!g_placed_structure_hook_installed) {
+            Log::GetLog()->error("TurretControl: PvP placed-structure hook installation failed");
+        }
+    }
+}
+
+void UninstallPlacementHooks() {
+    if (g_placement_check_hook_installed) {
+        ArkApi::GetHooks().DisableHook(
+            "APrimalStructure.IsAllowedToBuild", &Hook_APrimalStructure_IsAllowedToBuild);
+        g_placement_check_hook_installed = false;
+    }
+    if (g_placed_structure_hook_installed) {
+        ArkApi::GetHooks().DisableHook(
+            "APrimalStructure.PlacedStructure", &Hook_APrimalStructure_PlacedStructure);
+        g_placed_structure_hook_installed = false;
+    }
+}
 
 void ApplyInventoryHookState() {
     if (g_config.inventory_cap_enabled && !g_inventory_max_hook_installed) {
@@ -1117,6 +1249,13 @@ Config ParseConfig(const minijson::Value& root) {
     c.hard_cap_scan_radius = minijson::number(root, "General", "HardCapScanRadius", c.hard_cap_scan_radius);
     c.startup_delay_seconds = minijson::integer(root, "General", "StartupDelaySeconds", c.startup_delay_seconds);
 
+    c.pvp_placement_cooldown_enabled = minijson::boolean(
+        root, "PvpPlacementCooldown", "Enabled", c.pvp_placement_cooldown_enabled);
+    c.pvp_placement_cooldown_seconds = minijson::number(
+        root, "PvpPlacementCooldown", "Seconds", c.pvp_placement_cooldown_seconds);
+    const auto placement_tokens = minijson::strings(root, "PvpPlacementCooldown", "ClassNameTokens");
+    if (!placement_tokens.empty()) c.pvp_placement_class_tokens = placement_tokens;
+
     c.use_permissions = minijson::boolean(root, "Permissions", "UsePermissions", c.use_permissions);
     c.permission = minijson::str(root, "Permissions", "DefaultPermission", c.permission);
 
@@ -1156,6 +1295,7 @@ Config ParseConfig(const minijson::Value& root) {
     c.turret_success = minijson::str(root, "Messages", "TurretSuccess", c.turret_success);
     c.targeting_unconfigured = minijson::str(root, "Messages", "TargetingUnconfigured", c.targeting_unconfigured);
     c.pvp_blocked = minijson::str(root, "Messages", "PvpBlocked", c.pvp_blocked);
+    c.pvp_placement_blocked = minijson::str(root, "Messages", "PvpPlacementBlocked", c.pvp_placement_blocked);
     c.reload_ok = minijson::str(root, "Messages", "ReloadOk", c.reload_ok);
     c.reload_failed = minijson::str(root, "Messages", "ReloadFailed", c.reload_failed);
     c.hard_cap_refund = minijson::str(root, "Messages", "HardCapRefund", c.hard_cap_refund);
@@ -1167,6 +1307,7 @@ Config ParseConfig(const minijson::Value& root) {
     c.hard_cap_interval_seconds = std::max(1, c.hard_cap_interval_seconds);
     c.hard_cap_scan_radius = std::max(1000.0f, c.hard_cap_scan_radius);
     c.startup_delay_seconds = std::max(0, c.startup_delay_seconds);
+    c.pvp_placement_cooldown_seconds = std::max(0.0f, c.pvp_placement_cooldown_seconds);
     c.fill_notification_scale = std::max(0.1f, c.fill_notification_scale);
     c.fill_notification_time = std::max(0.1f, c.fill_notification_time);
     return c;
@@ -1243,13 +1384,18 @@ void Load() {
     g_inventory_max_hook_installed = false;
     g_inventory_add_hook_installed = false;
     g_inventory_remote_hook_installed = false;
+    g_placement_check_hook_installed = false;
+    g_placed_structure_hook_installed = false;
+    g_last_pvp_defense_placement.clear();
+    InstallPlacementHooks();
     ArkApi::GetCommands().AddOnTimerCallback("TurretControl.Runtime", &RuntimeTimer);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.Reload", &ReloadCommand);
-    Log::GetLog()->info("Loaded plugin - TurretControl v1.7 ManualStackCap");
+    Log::GetLog()->info("Loaded plugin - TurretControl v1.8 PvpPlacementCooldown");
 }
 
 void Unload() {
     UnregisterChatCommands();
+    UninstallPlacementHooks();
     if (g_inventory_max_hook_installed) {
         ArkApi::GetHooks().DisableHook("UPrimalInventoryComponent.AllowAddInventoryItem_MaxQuantity",
             &Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity);
@@ -1268,6 +1414,7 @@ void Unload() {
     ArkApi::GetCommands().RemoveOnTimerCallback("TurretControl.Runtime");
     ArkApi::GetCommands().RemoveConsoleCommand("TurretControl.Reload");
     g_pvp_checker = nullptr;
+    g_last_pvp_defense_placement.clear();
     g_custom_heavy.clear(); g_custom_tek.clear(); g_custom_auto.clear();
 }
 
