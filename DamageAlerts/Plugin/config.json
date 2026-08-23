@@ -19,7 +19,6 @@
   "CombatBalance": {
     "Enabled": true,
     "TekRifleStructureDamageCap": 500.0,
-    "TekRifleCharacterDamageCap": 500.0,
     "TurretCharacterDamageMultiplier": 1.5
   },
   "Messages": {

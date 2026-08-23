@@ -52,7 +52,6 @@ struct Config {
 
     bool combat_balance_enabled = true;
     float tek_rifle_structure_damage_cap = 500.0f;
-    float tek_rifle_character_damage_cap = 500.0f;
     float turret_character_damage_multiplier = 1.5f;
 
     std::string attacker_hit = "+{0} урона по {1}";
@@ -172,17 +171,15 @@ bool IsTurretDamage(AActor* damage_causer) {
     return false;
 }
 
-float ApplyCombatBalance(float damage, bool structure_target,
+float ApplyCombatBalance(float damage, bool structure_target, int target_team,
                          AController* event_instigator, AActor* damage_causer) {
     if (!g_config.combat_balance_enabled || damage <= 0.0f) return damage;
 
     float adjusted = damage;
-    if (IsTekRifleDamage(event_instigator, damage_causer)) {
-        const float cap = structure_target
-            ? g_config.tek_rifle_structure_damage_cap
-            : g_config.tek_rifle_character_damage_cap;
+    if (structure_target && IsTekRifleDamage(event_instigator, damage_causer)) {
+        const float cap = g_config.tek_rifle_structure_damage_cap;
         if (cap > 0.0f) adjusted = std::min(adjusted, cap);
-    } else if (!structure_target && IsTurretDamage(damage_causer)) {
+    } else if (!structure_target && IsPlayerOwnedTeam(target_team) && IsTurretDamage(damage_causer)) {
         adjusted *= std::max(0.0f, g_config.turret_character_damage_multiplier);
     }
     return std::max(0.0f, adjusted);
@@ -331,7 +328,8 @@ DECLARE_HOOK(APrimalStructure_TakeDamage, float, APrimalStructure*, float, FDama
 
 float Hook_APrimalCharacter_TakeDamage(APrimalCharacter* _this, float damage, FDamageEvent* damage_event,
                                         AController* event_instigator, AActor* damage_causer) {
-    damage = ApplyCombatBalance(damage, false, event_instigator, damage_causer);
+    const int target_team = _this ? _this->TargetingTeamField() : -1;
+    damage = ApplyCombatBalance(damage, false, target_team, event_instigator, damage_causer);
     const float result =
         APrimalCharacter_TakeDamage_original(_this, damage, damage_event, event_instigator, damage_causer);
 
@@ -345,7 +343,7 @@ float Hook_APrimalCharacter_TakeDamage(APrimalCharacter* _this, float damage, FD
 
 float Hook_APrimalStructure_TakeDamage(APrimalStructure* _this, float damage, FDamageEvent* damage_event,
                                         AController* event_instigator, AActor* damage_causer) {
-    damage = ApplyCombatBalance(damage, true, event_instigator, damage_causer);
+    damage = ApplyCombatBalance(damage, true, -1, event_instigator, damage_causer);
     const float result =
         APrimalStructure_TakeDamage_original(_this, damage, damage_event, event_instigator, damage_causer);
 
@@ -383,8 +381,6 @@ Config ParseConfig(const minijson::Value& root) {
     c.combat_balance_enabled = minijson::boolean(root, "CombatBalance", "Enabled", c.combat_balance_enabled);
     c.tek_rifle_structure_damage_cap = minijson::number(
         root, "CombatBalance", "TekRifleStructureDamageCap", c.tek_rifle_structure_damage_cap);
-    c.tek_rifle_character_damage_cap = minijson::number(
-        root, "CombatBalance", "TekRifleCharacterDamageCap", c.tek_rifle_character_damage_cap);
     c.turret_character_damage_multiplier = minijson::number(
         root, "CombatBalance", "TurretCharacterDamageMultiplier", c.turret_character_damage_multiplier);
 
@@ -394,7 +390,6 @@ Config ParseConfig(const minijson::Value& root) {
     c.flush_interval_seconds = std::max(1, c.flush_interval_seconds);
     c.min_tribe_team_id = std::max(1, c.min_tribe_team_id);
     c.tek_rifle_structure_damage_cap = std::max(0.0f, c.tek_rifle_structure_damage_cap);
-    c.tek_rifle_character_damage_cap = std::max(0.0f, c.tek_rifle_character_damage_cap);
     c.turret_character_damage_multiplier = std::max(0.0f, c.turret_character_damage_multiplier);
     return c;
 }
