@@ -46,6 +46,7 @@ struct Config {
     bool floating_damage_enabled = true;
     bool force_native_server_setting = true;
     bool show_enemy_damage_to_victim_tribe = true;
+    bool show_automated_turret_damage_to_owner = false;
     bool also_send_attacker_chat = false;
     float floating_damage_vertical_offset = 100.0f;
     std::string test_command = "/datest";
@@ -53,7 +54,7 @@ struct Config {
     bool combat_balance_enabled = true;
     float enemy_structure_damage_multiplier = 0.5f;
     float tek_rifle_structure_damage_cap = 500.0f;
-    float turret_character_damage_multiplier = 1.5f;
+    float turret_character_damage_multiplier = 6.0f;
 
     std::string attacker_hit = "+{0} урона по {1}";
     std::string victim_hit = "-{0} урона по {1} (враг)";
@@ -238,7 +239,13 @@ void RecordDamage(AActor* target, AController* event_instigator, AActor* damage_
 
     const AttackerInfo attacker = ResolveAttacker(event_instigator, damage_causer);
 
-    if (g_config.notify_attacker && attacker.player && amount >= g_config.min_damage_to_report) {
+    // Automated turrets can carry their owner's controller/team as the
+    // instigator. Treating that as a personal shot gives the owner a green
+    // number at the remote victim and effectively reveals the victim through
+    // terrain. Personal weapon hits still use the normal outgoing number.
+    const bool automated_turret_hit = IsTurretDamage(damage_causer);
+    if (g_config.notify_attacker && attacker.player && amount >= g_config.min_damage_to_report &&
+        (g_config.show_automated_turret_damage_to_owner || !automated_turret_hit)) {
         // Always send the native client RPC for the actual attacker. Merely
         // toggling bShowFloatingDamageText at runtime is not reliably
         // replicated to already connected ASE clients, so relying on that
@@ -407,6 +414,9 @@ Config ParseConfig(const minijson::Value& root) {
         root, "FloatingDamage", "ForceNativeServerSetting", c.force_native_server_setting);
     c.show_enemy_damage_to_victim_tribe = minijson::boolean(
         root, "FloatingDamage", "ShowEnemyDamageToVictimTribe", c.show_enemy_damage_to_victim_tribe);
+    c.show_automated_turret_damage_to_owner = minijson::boolean(
+        root, "FloatingDamage", "ShowAutomatedTurretDamageToOwner",
+        c.show_automated_turret_damage_to_owner);
     c.also_send_attacker_chat = minijson::boolean(root, "FloatingDamage", "AlsoSendAttackerChat", c.also_send_attacker_chat);
     c.floating_damage_vertical_offset = minijson::number(
         root, "FloatingDamage", "VerticalOffset", c.floating_damage_vertical_offset);
@@ -466,7 +476,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
     }
 
     std::ostringstream status;
-    status << "DamageNumbers v2.0 FinalDamageCap OK | native="
+    status << "DamageNumbers v2.1 TurretPrivacy OK | native="
            << (g_native_floating_applied ? "ON" : "WAIT")
            << " | character_hits=" << g_character_damage_events
            << " | structure_hits=" << g_structure_damage_events
@@ -478,7 +488,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 
 void Load() {
     Log::Get().Init("DamageNumbers");
-    Log::GetLog()->info("Loading plugin - DamageNumbers v2.0 FinalDamageCap");
+    Log::GetLog()->info("Loading plugin - DamageNumbers v2.1 TurretPrivacy");
 
     try {
         DamageAlerts::ReadConfig();

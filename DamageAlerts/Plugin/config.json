@@ -10,6 +10,7 @@
     "Enabled": true,
     "ForceNativeServerSetting": false,
     "ShowEnemyDamageToVictimTribe": true,
+    "ShowAutomatedTurretDamageToOwner": false,
     "AlsoSendAttackerChat": false,
     "VerticalOffset": 100.0
   },
@@ -20,7 +21,7 @@
     "Enabled": true,
     "EnemyStructureDamageMultiplier": 0.5,
     "TekRifleStructureDamageCap": 500.0,
-    "TurretCharacterDamageMultiplier": 1.5
+    "TurretCharacterDamageMultiplier": 6.0
   },
   "Messages": {
     "AttackerHit": "+{0} урона по {1}",
