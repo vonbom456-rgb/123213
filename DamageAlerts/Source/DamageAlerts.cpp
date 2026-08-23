@@ -46,7 +46,16 @@ struct Config {
     bool floating_damage_enabled = true;
     bool force_native_server_setting = true;
     bool show_enemy_damage_to_victim_tribe = true;
-    bool show_automated_turret_damage_to_owner = false;
+    bool show_outgoing_player_damage = true;
+    bool show_outgoing_dino_damage = true;
+    bool show_outgoing_structure_damage = true;
+    bool show_self_damage = true;
+    bool show_turret_damage_to_players = true;
+    bool show_turret_damage_to_dinos = true;
+    bool show_turret_damage_to_structures = false;
+    bool show_victim_player_damage = true;
+    bool show_victim_dino_damage = true;
+    bool show_victim_structure_damage = true;
     bool also_send_attacker_chat = false;
     float floating_damage_vertical_offset = 100.0f;
     std::string test_command = "/datest";
@@ -84,9 +93,36 @@ void SendColored(AShooterPlayerController* pc, const std::string& text, const FL
     ArkApi::GetApiUtils().SendServerMessage(pc, color, *message);
 }
 
-void SendEnemyFloatingDamage(AActor* target, int victim_team, int attacker_team, float amount) {
+FVector GetCameraFrontLocation(AShooterPlayerController* pc) {
+    FVector location{};
+    FRotator rotation{};
+    if (!pc) return location;
+    pc->GetPlayerViewPoint(&location, &rotation);
+    constexpr float degrees_to_radians = 3.14159265358979323846f / 180.0f;
+    const float pitch = rotation.Pitch * degrees_to_radians;
+    const float yaw = rotation.Yaw * degrees_to_radians;
+    const FVector forward(
+        std::cos(pitch) * std::cos(yaw),
+        std::cos(pitch) * std::sin(yaw),
+        std::sin(pitch));
+    location += forward * 600.0f;
+    location.Z += 50.0f;
+    return location;
+}
+
+bool CategoryEnabled(Category cat, bool player, bool dino, bool structure) {
+    if (cat == Category::Player) return player;
+    if (cat == Category::Dino) return dino;
+    return structure;
+}
+
+void SendEnemyFloatingDamage(AActor* target, int victim_team, int attacker_team,
+                             float amount, Category cat) {
     if (!g_config.floating_damage_enabled || !g_config.show_enemy_damage_to_victim_tribe ||
-        !target || amount < g_config.min_damage_to_report) return;
+        !target || amount < g_config.min_damage_to_report ||
+        !CategoryEnabled(cat, g_config.show_victim_player_damage,
+                         g_config.show_victim_dino_damage,
+                         g_config.show_victim_structure_damage)) return;
 
     FVector location{};
     FVector extent{};
@@ -102,10 +138,16 @@ void SendEnemyFloatingDamage(AActor* target, int victim_team, int attacker_team,
         auto* pc = static_cast<AShooterPlayerController*>(base_pc);
         if (ArkApi::GetApiUtils().GetTribeID(pc) != victim_team) continue;
 
+        FVector display_location = location;
+        if (cat == Category::Player &&
+            target == static_cast<AActor*>(pc->GetPlayerCharacter())) {
+            display_location = GetCameraFrontLocation(pc);
+        }
+
         // Passing the enemy attacker's team lets ARK apply its native enemy
         // colour (red) for every victim-tribe client. No client mod is needed.
         pc->ClientAddFloatingDamageText(
-            FVector_NetQuantize(location), displayed_damage, attacker_team);
+            FVector_NetQuantize(display_location), displayed_damage, attacker_team);
         ++g_floating_rpc_events;
     }
 }
@@ -246,9 +288,17 @@ void RecordDamage(AActor* target, AController* event_instigator, AActor* damage_
     // number at the remote victim and effectively reveals the victim through
     // terrain. Personal weapon hits still use the normal outgoing number.
     const bool automated_turret_hit = IsTurretDamage(damage_causer);
+    const bool outgoing_category_enabled = CategoryEnabled(
+        cat, g_config.show_outgoing_player_damage,
+        g_config.show_outgoing_dino_damage,
+        g_config.show_outgoing_structure_damage);
+    const bool turret_category_enabled = CategoryEnabled(
+        cat, g_config.show_turret_damage_to_players,
+        g_config.show_turret_damage_to_dinos,
+        g_config.show_turret_damage_to_structures);
     if (g_config.notify_attacker && attacker.player && amount >= g_config.min_damage_to_report &&
-        !self_damage &&
-        (g_config.show_automated_turret_damage_to_owner || !automated_turret_hit)) {
+        outgoing_category_enabled && (!self_damage || g_config.show_self_damage) &&
+        (!automated_turret_hit || turret_category_enabled)) {
         // Always send the native client RPC for the actual attacker. Merely
         // toggling bShowFloatingDamageText at runtime is not reliably
         // replicated to already connected ASE clients, so relying on that
@@ -258,7 +308,9 @@ void RecordDamage(AActor* target, AController* event_instigator, AActor* damage_
             FVector extent{};
             // Character bounds can lag or expand during falling/ragdoll. Use
             // the live root-component position for moving player/dino targets.
-            if (cat != Category::Structure && target->RootComponentField()) {
+            if (self_damage) {
+                location = GetCameraFrontLocation(attacker.player);
+            } else if (cat != Category::Structure && target->RootComponentField()) {
                 target->RootComponentField()->GetWorldLocation(&location);
             } else {
                 target->GetActorBounds(false, &location, &extent);
@@ -284,7 +336,7 @@ void RecordDamage(AActor* target, AController* event_instigator, AActor* damage_
     const bool enemy_tribe_damage = IsPlayerOwnedTeam(target_team) &&
         IsPlayerOwnedTeam(attacker.team) && attacker.team != target_team;
     if (enemy_tribe_damage) {
-        SendEnemyFloatingDamage(target, target_team, attacker.team, amount);
+        SendEnemyFloatingDamage(target, target_team, attacker.team, amount, cat);
     }
     if (g_config.notify_victim_tribe && enemy_tribe_damage) {
         g_pending_victim[target_team][static_cast<int>(cat)] += amount;
@@ -423,9 +475,16 @@ Config ParseConfig(const minijson::Value& root) {
         root, "FloatingDamage", "ForceNativeServerSetting", c.force_native_server_setting);
     c.show_enemy_damage_to_victim_tribe = minijson::boolean(
         root, "FloatingDamage", "ShowEnemyDamageToVictimTribe", c.show_enemy_damage_to_victim_tribe);
-    c.show_automated_turret_damage_to_owner = minijson::boolean(
-        root, "FloatingDamage", "ShowAutomatedTurretDamageToOwner",
-        c.show_automated_turret_damage_to_owner);
+    c.show_outgoing_player_damage = minijson::boolean(root, "FloatingDamage", "ShowOutgoingPlayerDamage", c.show_outgoing_player_damage);
+    c.show_outgoing_dino_damage = minijson::boolean(root, "FloatingDamage", "ShowOutgoingDinoDamage", c.show_outgoing_dino_damage);
+    c.show_outgoing_structure_damage = minijson::boolean(root, "FloatingDamage", "ShowOutgoingStructureDamage", c.show_outgoing_structure_damage);
+    c.show_self_damage = minijson::boolean(root, "FloatingDamage", "ShowSelfDamage", c.show_self_damage);
+    c.show_turret_damage_to_players = minijson::boolean(root, "FloatingDamage", "ShowTurretDamageToPlayers", c.show_turret_damage_to_players);
+    c.show_turret_damage_to_dinos = minijson::boolean(root, "FloatingDamage", "ShowTurretDamageToDinos", c.show_turret_damage_to_dinos);
+    c.show_turret_damage_to_structures = minijson::boolean(root, "FloatingDamage", "ShowTurretDamageToStructures", c.show_turret_damage_to_structures);
+    c.show_victim_player_damage = minijson::boolean(root, "FloatingDamage", "ShowVictimPlayerDamage", c.show_victim_player_damage);
+    c.show_victim_dino_damage = minijson::boolean(root, "FloatingDamage", "ShowVictimDinoDamage", c.show_victim_dino_damage);
+    c.show_victim_structure_damage = minijson::boolean(root, "FloatingDamage", "ShowVictimStructureDamage", c.show_victim_structure_damage);
     c.also_send_attacker_chat = minijson::boolean(root, "FloatingDamage", "AlsoSendAttackerChat", c.also_send_attacker_chat);
     c.floating_damage_vertical_offset = minijson::number(
         root, "FloatingDamage", "VerticalOffset", c.floating_damage_vertical_offset);
@@ -485,7 +544,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
     }
 
     std::ostringstream status;
-    status << "DamageNumbers v2.2 CharacterPosition OK | native="
+    status << "DamageNumbers v2.3 CategoryToggles OK | native="
            << (g_native_floating_applied ? "ON" : "WAIT")
            << " | character_hits=" << g_character_damage_events
            << " | structure_hits=" << g_structure_damage_events
@@ -497,7 +556,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 
 void Load() {
     Log::Get().Init("DamageNumbers");
-    Log::GetLog()->info("Loading plugin - DamageNumbers v2.2 CharacterPosition");
+    Log::GetLog()->info("Loading plugin - DamageNumbers v2.3 CategoryToggles");
 
     try {
         DamageAlerts::ReadConfig();
