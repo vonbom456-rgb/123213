@@ -14,6 +14,7 @@
 #include <API/ARK/Ark.h>
 #include <API/UE/Math/ColorList.h>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -48,6 +49,11 @@ struct Config {
     bool also_send_attacker_chat = false;
     float floating_damage_vertical_offset = 100.0f;
     std::string test_command = "/datest";
+
+    bool combat_balance_enabled = true;
+    float tek_rifle_structure_damage_cap = 500.0f;
+    float tek_rifle_character_damage_cap = 500.0f;
+    float turret_character_damage_multiplier = 1.5f;
 
     std::string attacker_hit = "+{0} урона по {1}";
     std::string victim_hit = "-{0} урона по {1} (враг)";
@@ -114,6 +120,72 @@ struct AttackerInfo {
 
 bool IsPlayerOwnedTeam(int team) {
     return team >= g_config.min_tribe_team_id;
+}
+
+std::string ToLower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+std::string GetClassFullName(UObject* object) {
+    if (!object || !object->ClassField()) return {};
+    UObject* cdo = object->ClassField()->GetDefaultObject(true);
+    if (!cdo) return {};
+    FString full_name;
+    cdo->GetFullName(&full_name, nullptr);
+    return ToLower(full_name.ToString());
+}
+
+bool NameLooksLikeTekRifle(const std::string& name) {
+    if (name.empty()) return false;
+    return name.find("tekrifle") != std::string::npos ||
+        name.find("weaptek") != std::string::npos ||
+        (name.find("tek") != std::string::npos &&
+         name.find("rifle") != std::string::npos);
+}
+
+bool IsTekRifleDamage(AController* event_instigator, AActor* damage_causer) {
+    AActor* current = damage_causer;
+    for (int depth = 0; current && depth < 4; ++depth) {
+        if (NameLooksLikeTekRifle(GetClassFullName(current))) return true;
+        current = current->OwnerField();
+    }
+
+    if (event_instigator && event_instigator->IsA(AShooterPlayerController::GetPrivateStaticClass())) {
+        auto* pc = static_cast<AShooterPlayerController*>(event_instigator);
+        AShooterCharacter* character = pc->GetPlayerCharacter();
+        if (character && NameLooksLikeTekRifle(GetClassFullName(character->CurrentWeaponField()))) return true;
+    }
+    return false;
+}
+
+bool IsTurretDamage(AActor* damage_causer) {
+    AActor* current = damage_causer;
+    for (int depth = 0; current && depth < 5; ++depth) {
+        if (current->IsA(APrimalStructureTurret::GetPrivateStaticClass())) return true;
+        const std::string name = GetClassFullName(current);
+        if (name.find("turret") != std::string::npos &&
+            (name.find("projectile") != std::string::npos || name.find("bullet") != std::string::npos)) return true;
+        current = current->OwnerField();
+    }
+    return false;
+}
+
+float ApplyCombatBalance(float damage, bool structure_target,
+                         AController* event_instigator, AActor* damage_causer) {
+    if (!g_config.combat_balance_enabled || damage <= 0.0f) return damage;
+
+    float adjusted = damage;
+    if (IsTekRifleDamage(event_instigator, damage_causer)) {
+        const float cap = structure_target
+            ? g_config.tek_rifle_structure_damage_cap
+            : g_config.tek_rifle_character_damage_cap;
+        if (cap > 0.0f) adjusted = std::min(adjusted, cap);
+    } else if (!structure_target && IsTurretDamage(damage_causer)) {
+        adjusted *= std::max(0.0f, g_config.turret_character_damage_multiplier);
+    }
+    return std::max(0.0f, adjusted);
 }
 
 AttackerInfo ResolveAttacker(AController* event_instigator, AActor* damage_causer) {
@@ -259,6 +331,7 @@ DECLARE_HOOK(APrimalStructure_TakeDamage, float, APrimalStructure*, float, FDama
 
 float Hook_APrimalCharacter_TakeDamage(APrimalCharacter* _this, float damage, FDamageEvent* damage_event,
                                         AController* event_instigator, AActor* damage_causer) {
+    damage = ApplyCombatBalance(damage, false, event_instigator, damage_causer);
     const float result =
         APrimalCharacter_TakeDamage_original(_this, damage, damage_event, event_instigator, damage_causer);
 
@@ -272,6 +345,7 @@ float Hook_APrimalCharacter_TakeDamage(APrimalCharacter* _this, float damage, FD
 
 float Hook_APrimalStructure_TakeDamage(APrimalStructure* _this, float damage, FDamageEvent* damage_event,
                                         AController* event_instigator, AActor* damage_causer) {
+    damage = ApplyCombatBalance(damage, true, event_instigator, damage_causer);
     const float result =
         APrimalStructure_TakeDamage_original(_this, damage, damage_event, event_instigator, damage_causer);
 
@@ -306,11 +380,22 @@ Config ParseConfig(const minijson::Value& root) {
         root, "FloatingDamage", "VerticalOffset", c.floating_damage_vertical_offset);
     c.test_command = minijson::str(root, "Diagnostics", "TestCommand", c.test_command);
 
+    c.combat_balance_enabled = minijson::boolean(root, "CombatBalance", "Enabled", c.combat_balance_enabled);
+    c.tek_rifle_structure_damage_cap = minijson::number(
+        root, "CombatBalance", "TekRifleStructureDamageCap", c.tek_rifle_structure_damage_cap);
+    c.tek_rifle_character_damage_cap = minijson::number(
+        root, "CombatBalance", "TekRifleCharacterDamageCap", c.tek_rifle_character_damage_cap);
+    c.turret_character_damage_multiplier = minijson::number(
+        root, "CombatBalance", "TurretCharacterDamageMultiplier", c.turret_character_damage_multiplier);
+
     c.attacker_hit = minijson::str(root, "Messages", "AttackerHit", c.attacker_hit);
     c.victim_hit = minijson::str(root, "Messages", "VictimHit", c.victim_hit);
 
     c.flush_interval_seconds = std::max(1, c.flush_interval_seconds);
     c.min_tribe_team_id = std::max(1, c.min_tribe_team_id);
+    c.tek_rifle_structure_damage_cap = std::max(0.0f, c.tek_rifle_structure_damage_cap);
+    c.tek_rifle_character_damage_cap = std::max(0.0f, c.tek_rifle_character_damage_cap);
+    c.turret_character_damage_multiplier = std::max(0.0f, c.turret_character_damage_multiplier);
     return c;
 }
 
@@ -349,7 +434,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
     }
 
     std::ostringstream status;
-    status << "DamageNumbers v1.7 DirectHitNumbers OK | native="
+    status << "DamageNumbers v1.8 CombatBalance OK | native="
            << (g_native_floating_applied ? "ON" : "WAIT")
            << " | character_hits=" << g_character_damage_events
            << " | structure_hits=" << g_structure_damage_events
@@ -361,7 +446,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 
 void Load() {
     Log::Get().Init("DamageNumbers");
-    Log::GetLog()->info("Loading plugin - DamageNumbers v1.7 DirectHitNumbers");
+    Log::GetLog()->info("Loading plugin - DamageNumbers v1.8 CombatBalance");
 
     try {
         DamageAlerts::ReadConfig();

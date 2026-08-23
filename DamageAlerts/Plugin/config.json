@@ -16,6 +16,12 @@
   "Diagnostics": {
     "TestCommand": "/datest"
   },
+  "CombatBalance": {
+    "Enabled": true,
+    "TekRifleStructureDamageCap": 500.0,
+    "TekRifleCharacterDamageCap": 500.0,
+    "TurretCharacterDamageMultiplier": 1.5
+  },
   "Messages": {
     "AttackerHit": "+{0} урона по {1}",
     "VictimHit": "-{0} урона по {1} (враг)"

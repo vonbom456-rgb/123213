@@ -9,11 +9,11 @@
     "RequireSameTribe": true,
     "AllowDuringPvpCooldown": false,
     "ShowMessages": true,
-    "HardCapEnabled": false,
+    "HardCapEnabled": true,
     "HardCapIntervalSeconds": 2,
     "HardCapScanRadius": 5000,
     "StartupDelaySeconds": 60,
-    "InventoryCapEnabled": false
+    "InventoryCapEnabled": true
   },
   "Permissions": {
     "UsePermissions": false,
