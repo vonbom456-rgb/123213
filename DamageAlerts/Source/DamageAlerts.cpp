@@ -54,7 +54,7 @@ struct Config {
     bool combat_balance_enabled = true;
     float enemy_structure_damage_multiplier = 0.5f;
     float tek_rifle_structure_damage_cap = 500.0f;
-    float turret_character_damage_multiplier = 6.0f;
+    float turret_character_damage_multiplier = 3.0f;
 
     std::string attacker_hit = "+{0} урона по {1}";
     std::string victim_hit = "-{0} урона по {1} (враг)";
@@ -238,6 +238,8 @@ void RecordDamage(AActor* target, AController* event_instigator, AActor* damage_
     const int target_team = target->TargetingTeamField();
 
     const AttackerInfo attacker = ResolveAttacker(event_instigator, damage_causer);
+    const bool self_damage = attacker.player &&
+        target == static_cast<AActor*>(attacker.player->GetPlayerCharacter());
 
     // Automated turrets can carry their owner's controller/team as the
     // instigator. Treating that as a personal shot gives the owner a green
@@ -245,6 +247,7 @@ void RecordDamage(AActor* target, AController* event_instigator, AActor* damage_
     // terrain. Personal weapon hits still use the normal outgoing number.
     const bool automated_turret_hit = IsTurretDamage(damage_causer);
     if (g_config.notify_attacker && attacker.player && amount >= g_config.min_damage_to_report &&
+        !self_damage &&
         (g_config.show_automated_turret_damage_to_owner || !automated_turret_hit)) {
         // Always send the native client RPC for the actual attacker. Merely
         // toggling bShowFloatingDamageText at runtime is not reliably
@@ -253,7 +256,13 @@ void RecordDamage(AActor* target, AController* event_instigator, AActor* damage_
         if (g_config.floating_damage_enabled) {
             FVector location{};
             FVector extent{};
-            target->GetActorBounds(false, &location, &extent);
+            // Character bounds can lag or expand during falling/ragdoll. Use
+            // the live root-component position for moving player/dino targets.
+            if (cat != Category::Structure && target->RootComponentField()) {
+                target->RootComponentField()->GetWorldLocation(&location);
+            } else {
+                target->GetActorBounds(false, &location, &extent);
+            }
             location.Z += g_config.floating_damage_vertical_offset;
             const int displayed_damage = std::max(1, static_cast<int>(std::llround(amount)));
 
@@ -476,7 +485,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
     }
 
     std::ostringstream status;
-    status << "DamageNumbers v2.1 TurretPrivacy OK | native="
+    status << "DamageNumbers v2.2 CharacterPosition OK | native="
            << (g_native_floating_applied ? "ON" : "WAIT")
            << " | character_hits=" << g_character_damage_events
            << " | structure_hits=" << g_structure_damage_events
@@ -488,7 +497,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 
 void Load() {
     Log::Get().Init("DamageNumbers");
-    Log::GetLog()->info("Loading plugin - DamageNumbers v2.1 TurretPrivacy");
+    Log::GetLog()->info("Loading plugin - DamageNumbers v2.2 CharacterPosition");
 
     try {
         DamageAlerts::ReadConfig();

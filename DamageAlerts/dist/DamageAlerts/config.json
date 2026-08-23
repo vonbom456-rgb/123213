@@ -21,7 +21,7 @@
     "Enabled": true,
     "EnemyStructureDamageMultiplier": 0.5,
     "TekRifleStructureDamageCap": 500.0,
-    "TurretCharacterDamageMultiplier": 6.0
+    "TurretCharacterDamageMultiplier": 3.0
   },
   "Messages": {
     "AttackerHit": "+{0} урона по {1}",
