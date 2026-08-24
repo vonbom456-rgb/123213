@@ -783,6 +783,32 @@ void FillCommandImpl(AShooterPlayerController* pc, FString*, EChatSendMode::Type
     }
 
     if (filled_turrets <= 0) {
+        bool has_live_deficit = false;
+        bool has_matching_ammo = false;
+        for (const auto& ref : turrets) {
+            if (!IsValidTurret(ref.turret)) continue;
+            UPrimalInventoryComponent* turret_inventory = ref.turret->MyInventoryComponentField();
+            if (!turret_inventory) continue;
+
+            const int live_amount = FamilyQuantity(turret_inventory, ref.kind);
+            if (live_amount >= LimitFor(ref.kind)) continue;
+
+            has_live_deficit = true;
+            if ((ref.kind == TurretKind::Tek && shards_available > 0) ||
+                ((ref.kind == TurretKind::Heavy || ref.kind == TurretKind::Auto) && arb_available > 0)) {
+                has_matching_ammo = true;
+            }
+        }
+
+        if (!has_live_deficit) {
+            Send(pc, g_config.already_full);
+            return;
+        }
+        if (!has_matching_ammo) {
+            Send(pc, g_config.no_ammo);
+            return;
+        }
+
         Log::GetLog()->warn(
             "TurretControl v1.7: /fill found {} valid turrets but transferred nothing. ARB={} Shards={}",
             turrets.size(), arb_available, shards_available);
@@ -1390,7 +1416,7 @@ void Load() {
     InstallPlacementHooks();
     ArkApi::GetCommands().AddOnTimerCallback("TurretControl.Runtime", &RuntimeTimer);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.Reload", &ReloadCommand);
-    Log::GetLog()->info("Loaded plugin - TurretControl v1.8 PvpPlacementCooldown");
+    Log::GetLog()->info("Loaded plugin - TurretControl v1.9 FillStatusFix");
 }
 
 void Unload() {

@@ -1,7 +1,7 @@
 {
   "FullName": "TurretControl",
   "Description": "Turret fill, mass controls, ammo caps and PvP defensive-placement cooldown for ARK: Survival Evolved",
-  "Version": 1.8,
+  "Version": 1.9,
   "MinApiVersion": 3.56,
   "Dependencies": []
 }
