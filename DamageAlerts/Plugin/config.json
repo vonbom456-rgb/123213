@@ -30,6 +30,8 @@
     "Enabled": true,
     "EnemyStructureDamageMultiplier": 0.5,
     "TekRifleStructureDamageCap": 500.0,
+    "TekBowCharacterDamageMultiplier": 5.0,
+    "TekBowStructureDamageMultiplier": 1.0,
     "TurretCharacterDamageMultiplier": 3.0
   },
   "Messages": {

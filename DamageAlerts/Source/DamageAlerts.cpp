@@ -63,6 +63,8 @@ struct Config {
     bool combat_balance_enabled = true;
     float enemy_structure_damage_multiplier = 0.5f;
     float tek_rifle_structure_damage_cap = 500.0f;
+    float tek_bow_character_damage_multiplier = 5.0f;
+    float tek_bow_structure_damage_multiplier = 1.0f;
     float turret_character_damage_multiplier = 3.0f;
 
     std::string attacker_hit = "+{0} урона по {1}";
@@ -205,6 +207,31 @@ bool IsTekRifleDamage(AController* event_instigator, AActor* damage_causer) {
     return false;
 }
 
+bool NameLooksLikeTekBow(const std::string& name) {
+    if (name.empty()) return false;
+    return name.find("tekbow") != std::string::npos ||
+        name.find("weaptekbow") != std::string::npos ||
+        name.find("bowtek") != std::string::npos ||
+        (name.find("tek") != std::string::npos &&
+         name.find("bow") != std::string::npos &&
+         name.find("crossbow") == std::string::npos);
+}
+
+bool IsTekBowDamage(AController* event_instigator, AActor* damage_causer) {
+    AActor* current = damage_causer;
+    for (int depth = 0; current && depth < 4; ++depth) {
+        if (NameLooksLikeTekBow(GetClassFullName(current))) return true;
+        current = current->OwnerField();
+    }
+
+    if (event_instigator && event_instigator->IsA(AShooterPlayerController::GetPrivateStaticClass())) {
+        auto* pc = static_cast<AShooterPlayerController*>(event_instigator);
+        AShooterCharacter* character = pc->GetPlayerCharacter();
+        if (character && NameLooksLikeTekBow(GetClassFullName(character->CurrentWeaponField()))) return true;
+    }
+    return false;
+}
+
 bool IsTurretDamage(AActor* damage_causer) {
     AActor* current = damage_causer;
     for (int depth = 0; current && depth < 5; ++depth) {
@@ -237,8 +264,16 @@ float ApplyCombatBalance(float damage, bool structure_target, int target_team,
             const float cap = g_config.tek_rifle_structure_damage_cap;
             if (cap > 0.0f) adjusted = std::min(adjusted, cap);
         }
-    } else if (!structure_target && IsPlayerOwnedTeam(target_team) && IsTurretDamage(damage_causer)) {
-        adjusted *= std::max(0.0f, g_config.turret_character_damage_multiplier);
+        if (IsTekBowDamage(event_instigator, damage_causer)) {
+            adjusted *= std::max(0.0f, g_config.tek_bow_structure_damage_multiplier);
+        }
+    } else if (!structure_target) {
+        if (IsTekBowDamage(event_instigator, damage_causer)) {
+            adjusted *= std::max(0.0f, g_config.tek_bow_character_damage_multiplier);
+        }
+        if (IsPlayerOwnedTeam(target_team) && IsTurretDamage(damage_causer)) {
+            adjusted *= std::max(0.0f, g_config.turret_character_damage_multiplier);
+        }
     }
     return std::max(0.0f, adjusted);
 }
@@ -495,6 +530,10 @@ Config ParseConfig(const minijson::Value& root) {
         root, "CombatBalance", "EnemyStructureDamageMultiplier", c.enemy_structure_damage_multiplier);
     c.tek_rifle_structure_damage_cap = minijson::number(
         root, "CombatBalance", "TekRifleStructureDamageCap", c.tek_rifle_structure_damage_cap);
+    c.tek_bow_character_damage_multiplier = minijson::number(
+        root, "CombatBalance", "TekBowCharacterDamageMultiplier", c.tek_bow_character_damage_multiplier);
+    c.tek_bow_structure_damage_multiplier = minijson::number(
+        root, "CombatBalance", "TekBowStructureDamageMultiplier", c.tek_bow_structure_damage_multiplier);
     c.turret_character_damage_multiplier = minijson::number(
         root, "CombatBalance", "TurretCharacterDamageMultiplier", c.turret_character_damage_multiplier);
 
@@ -505,6 +544,8 @@ Config ParseConfig(const minijson::Value& root) {
     c.min_tribe_team_id = std::max(1, c.min_tribe_team_id);
     c.enemy_structure_damage_multiplier = std::max(0.0f, c.enemy_structure_damage_multiplier);
     c.tek_rifle_structure_damage_cap = std::max(0.0f, c.tek_rifle_structure_damage_cap);
+    c.tek_bow_character_damage_multiplier = std::max(0.0f, c.tek_bow_character_damage_multiplier);
+    c.tek_bow_structure_damage_multiplier = std::max(0.0f, c.tek_bow_structure_damage_multiplier);
     c.turret_character_damage_multiplier = std::max(0.0f, c.turret_character_damage_multiplier);
     return c;
 }
@@ -544,7 +585,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
     }
 
     std::ostringstream status;
-    status << "DamageNumbers v2.3 CategoryToggles OK | native="
+    status << "DamageNumbers v2.4 TekBowBalance OK | native="
            << (g_native_floating_applied ? "ON" : "WAIT")
            << " | character_hits=" << g_character_damage_events
            << " | structure_hits=" << g_structure_damage_events
@@ -556,7 +597,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 
 void Load() {
     Log::Get().Init("DamageNumbers");
-    Log::GetLog()->info("Loading plugin - DamageNumbers v2.3 CategoryToggles");
+    Log::GetLog()->info("Loading plugin - DamageNumbers v2.4 TekBowBalance");
 
     try {
         DamageAlerts::ReadConfig();
