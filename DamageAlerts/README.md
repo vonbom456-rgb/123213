@@ -29,6 +29,7 @@ so rapid hits (turret fire, DoT) become one line, not spam.
   "FloatingDamage": {
     "Enabled": true,
     "ForceNativeServerSetting": false,
+    "DisableNativeServerSetting": true,
     "ShowEnemyDamageToVictimTribe": true,
     "AlsoSendAttackerChat": false,
     "VerticalOffset": 100.0
@@ -44,6 +45,9 @@ so rapid hits (turret fire, DoT) become one line, not spam.
 ```
 
 - `NotifyAttacker` — master switch for the attacker's damage feedback.
+- `FloatingDamage.DisableNativeServerSetting` — turns off ARK's unfiltered
+  global number stream. Keep this `true` when turret-number categories are
+  disabled; the plugin still sends its own filtered numbers for weapons.
 - `FloatingDamage.Enabled` — calls ASE's native
   `ClientAddFloatingDamageText` RPC at the target location. ARK renders and
   colours the number on the client, so there is no custom HUD asset or mod.

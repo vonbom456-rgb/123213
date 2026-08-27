@@ -1,7 +1,7 @@
 {
   "FullName": "DamageNumbers",
-  "Description": "Native outgoing damage numbers plus red floating enemy-damage numbers and alerts for the victim tribe",
-  "Version": 2.3,
+  "Description": "Filtered outgoing and victim damage numbers without automated-turret number spam",
+  "Version": 2.5,
   "MinApiVersion": 3.56,
   "Dependencies": []
 }

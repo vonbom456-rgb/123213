@@ -44,7 +44,8 @@ struct Config {
     bool notify_victim_tribe = true;
     int min_tribe_team_id = 50000;
     bool floating_damage_enabled = true;
-    bool force_native_server_setting = true;
+    bool force_native_server_setting = false;
+    bool disable_native_server_setting = true;
     bool show_enemy_damage_to_victim_tribe = true;
     bool show_outgoing_player_damage = true;
     bool show_outgoing_dino_damage = true;
@@ -346,7 +347,21 @@ void RecordDamage(AActor* target, AController* event_instigator, AActor* damage_
 std::chrono::steady_clock::time_point g_next_flush{};
 
 void FlushTimer() {
-    if (g_config.floating_damage_enabled && g_config.force_native_server_setting) {
+    // ARK's global floating-damage switch cannot distinguish a hand-held
+    // weapon from an automated turret.  When it is enabled, the owner sees a
+    // native green number for every turret projectile even if this plugin's
+    // turret categories are disabled.  Keep the global stream off and use the
+    // filtered ClientAddFloatingDamageText RPCs above instead.
+    if (g_config.disable_native_server_setting) {
+        AShooterGameMode* game_mode = ArkApi::GetApiUtils().GetShooterGameMode();
+        if (game_mode) {
+            game_mode->bShowFloatingDamageTextField() = false;
+            if (!g_native_floating_applied) {
+                g_native_floating_applied = true;
+                Log::GetLog()->info("DamageNumbers: native ARK floating damage disabled; filtered RPC mode active");
+            }
+        }
+    } else if (g_config.floating_damage_enabled && g_config.force_native_server_setting) {
         AShooterGameMode* game_mode = ArkApi::GetApiUtils().GetShooterGameMode();
         if (game_mode) {
             game_mode->bShowFloatingDamageTextField() = true;
@@ -473,6 +488,10 @@ Config ParseConfig(const minijson::Value& root) {
     c.floating_damage_enabled = minijson::boolean(root, "FloatingDamage", "Enabled", c.floating_damage_enabled);
     c.force_native_server_setting = minijson::boolean(
         root, "FloatingDamage", "ForceNativeServerSetting", c.force_native_server_setting);
+    c.disable_native_server_setting = minijson::boolean(
+        root, "FloatingDamage", "DisableNativeServerSetting", c.disable_native_server_setting);
+    // Disabling wins if both legacy options are accidentally enabled.
+    if (c.disable_native_server_setting) c.force_native_server_setting = false;
     c.show_enemy_damage_to_victim_tribe = minijson::boolean(
         root, "FloatingDamage", "ShowEnemyDamageToVictimTribe", c.show_enemy_damage_to_victim_tribe);
     c.show_outgoing_player_damage = minijson::boolean(root, "FloatingDamage", "ShowOutgoingPlayerDamage", c.show_outgoing_player_damage);
@@ -544,8 +563,9 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
     }
 
     std::ostringstream status;
-    status << "DamageNumbers v2.3 CategoryToggles OK | native="
-           << (g_native_floating_applied ? "ON" : "WAIT")
+    status << "DamageNumbers v2.5 NativeTurretSpamFix OK | native="
+           << (g_config.disable_native_server_setting ? "OFF" :
+               (g_native_floating_applied ? "ON" : "WAIT"))
            << " | character_hits=" << g_character_damage_events
            << " | structure_hits=" << g_structure_damage_events
            << " | rpc=" << g_floating_rpc_events;
@@ -556,7 +576,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 
 void Load() {
     Log::Get().Init("DamageNumbers");
-    Log::GetLog()->info("Loading plugin - DamageNumbers v2.3 CategoryToggles");
+    Log::GetLog()->info("Loading plugin - DamageNumbers v2.5 NativeTurretSpamFix");
 
     try {
         DamageAlerts::ReadConfig();

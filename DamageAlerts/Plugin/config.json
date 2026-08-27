@@ -9,6 +9,7 @@
   "FloatingDamage": {
     "Enabled": true,
     "ForceNativeServerSetting": false,
+    "DisableNativeServerSetting": true,
     "ShowEnemyDamageToVictimTribe": true,
     "ShowOutgoingPlayerDamage": true,
     "ShowOutgoingDinoDamage": true,
