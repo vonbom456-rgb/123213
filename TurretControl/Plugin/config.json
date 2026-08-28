@@ -30,6 +30,9 @@
       "generator"
     ]
   },
+  "NetworkOptimization": {
+    "DisableClientProjectileEffects": true
+  },
   "FillRadiusHologram": {
     "Enabled": true,
     "NativeDebugSphere": true,

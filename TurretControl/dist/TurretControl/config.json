@@ -19,6 +19,9 @@
     "UsePermissions": false,
     "DefaultPermission": "TurretControl.Default"
   },
+  "NetworkOptimization": {
+    "DisableClientProjectileEffects": true
+  },
   "FillRadiusHologram": {
     "Enabled": true,
     "NativeDebugSphere": true,

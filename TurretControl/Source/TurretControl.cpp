@@ -42,6 +42,12 @@ struct Config {
     float hard_cap_scan_radius = 5000.0f;
     int startup_delay_seconds = 60;
 
+    // The server still calculates targeting, damage and ammunition. This
+    // switch only stops the cosmetic per-shot projectile/trail request sent
+    // to nearby clients, which can overflow ASE's reliable network queue
+    // when a large S+ turret wall fires at one target.
+    bool disable_client_projectile_effects = true;
+
     bool pvp_placement_cooldown_enabled = true;
     float pvp_placement_cooldown_seconds = 3.0f;
     std::vector<std::string> pvp_placement_class_tokens{
@@ -1101,7 +1107,8 @@ bool g_world_ready_seen = false;
 bool g_runtime_ready = false;
 
 void HardCapTimer() {
-    if (!g_runtime_ready || !g_config.hard_cap_enabled) return;
+    if (!g_runtime_ready ||
+        (!g_config.hard_cap_enabled && !g_config.disable_client_projectile_effects)) return;
 
     const auto now = std::chrono::steady_clock::now();
     if (now < g_next_hard_cap_check) return;
@@ -1119,6 +1126,7 @@ void HardCapTimer() {
     std::unordered_set<APrimalStructureTurret*> checked;
     std::unordered_map<int, std::vector<RefundTarget>> refund_targets;
     std::vector<FVector> scan_origins;
+    int disabled_client_effects = 0;
 
     // Build the owner/refund lookup before scanning any turret. Previously an
     // enemy controller could encounter the turret first, mark it checked and
@@ -1155,6 +1163,16 @@ void HardCapTimer() {
             auto* turret = static_cast<APrimalStructureTurret*>(actor);
             if (!IsValidTurret(turret)) continue;
             if (!checked.insert(turret).second) continue;
+
+            if (g_config.disable_client_projectile_effects) {
+                auto client_projectile = turret->bClientFireProjectile();
+                if (client_projectile.Get()) {
+                    client_projectile.Set(false);
+                    ++disabled_client_effects;
+                }
+            }
+
+            if (!g_config.hard_cap_enabled) continue;
 
             const TurretKind kind = DetectTurretKind(turret);
             if (kind == TurretKind::Unsupported) continue;
@@ -1203,6 +1221,12 @@ void HardCapTimer() {
                 GetClassFullName(turret), static_cast<int>(kind), current, limit, overflow, removed, refunded);
         }
     }
+
+    if (disabled_client_effects > 0) {
+        Log::GetLog()->info(
+            "TurretControl v2.0 network guard: disabled per-shot client projectile effects on {} turret(s)",
+            disabled_client_effects);
+    }
 }
 
 // Do not install the global inventory hook or scan structures while ARK is
@@ -1227,8 +1251,9 @@ void RuntimeTimer() {
         g_runtime_ready = true;
         ApplyInventoryHookState();
         Log::GetLog()->info(
-            "TurretControl v1.7 runtime enabled after world startup (InventoryCap={}, HardCap={})",
-            g_config.inventory_cap_enabled, g_config.hard_cap_enabled);
+            "TurretControl v2.0 runtime enabled after world startup (InventoryCap={}, HardCap={}, DisableClientProjectileEffects={})",
+            g_config.inventory_cap_enabled, g_config.hard_cap_enabled,
+            g_config.disable_client_projectile_effects);
     }
 
     if (g_runtime_ready) HardCapTimer();
@@ -1274,6 +1299,9 @@ Config ParseConfig(const minijson::Value& root) {
     c.hard_cap_interval_seconds = minijson::integer(root, "General", "HardCapIntervalSeconds", c.hard_cap_interval_seconds);
     c.hard_cap_scan_radius = minijson::number(root, "General", "HardCapScanRadius", c.hard_cap_scan_radius);
     c.startup_delay_seconds = minijson::integer(root, "General", "StartupDelaySeconds", c.startup_delay_seconds);
+    c.disable_client_projectile_effects = minijson::boolean(
+        root, "NetworkOptimization", "DisableClientProjectileEffects",
+        c.disable_client_projectile_effects);
 
     c.pvp_placement_cooldown_enabled = minijson::boolean(
         root, "PvpPlacementCooldown", "Enabled", c.pvp_placement_cooldown_enabled);
@@ -1416,7 +1444,7 @@ void Load() {
     InstallPlacementHooks();
     ArkApi::GetCommands().AddOnTimerCallback("TurretControl.Runtime", &RuntimeTimer);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.Reload", &ReloadCommand);
-    Log::GetLog()->info("Loaded plugin - TurretControl v1.9 FillStatusFix");
+    Log::GetLog()->info("Loaded plugin - TurretControl v2.0 ReliableBufferGuard");
 }
 
 void Unload() {
