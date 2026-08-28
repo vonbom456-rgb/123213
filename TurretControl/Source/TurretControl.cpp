@@ -148,7 +148,15 @@ struct TurretRpcStats {
     std::uint64_t damage_total = 0;
 };
 
+struct ReliableRpcStats {
+    std::string function_name;
+    std::string object_class;
+    std::uint64_t window = 0;
+    std::uint64_t total = 0;
+};
+
 std::unordered_map<UClass*, TurretRpcStats> g_turret_rpc_stats;
+std::unordered_map<UFunction*, ReliableRpcStats> g_reliable_rpc_stats;
 std::unordered_set<UClass*> g_logged_turret_classes;
 std::chrono::steady_clock::time_point g_next_rpc_log = std::chrono::steady_clock::now();
 
@@ -219,6 +227,14 @@ DECLARE_HOOK(APrimalStructureTurret_DealDamage,
     TSubclassOf<UDamageType>,
     float);
 
+// Global read-only RPC census. Only functions marked both Net and
+// NetReliable are counted, and the original ProcessEvent is always called.
+DECLARE_HOOK(UObject_ProcessEvent,
+    void,
+    UObject*,
+    UFunction*,
+    void*);
+
 std::string ConfigPath() {
     return ArkApi::Tools::GetCurrentDir() + "/ArkApi/Plugins/TurretControl/config.json";
 }
@@ -267,6 +283,13 @@ std::string GetClassFullName(UClass* cls) {
 
 std::string GetClassFullName(UObject* obj) {
     return obj ? GetClassFullName(obj->ClassField()) : std::string{};
+}
+
+std::string GetObjectFullName(UObject* obj) {
+    if (!obj) return {};
+    FString name;
+    obj->GetFullName(&name, nullptr);
+    return name.ToString();
 }
 
 bool IsValidTurret(APrimalStructureTurret* turret) {
@@ -1128,6 +1151,24 @@ void Hook_APrimalStructureTurret_DealDamage(
         turret, impact, shoot_dir, damage_amount, damage_type, impulse);
 }
 
+void Hook_UObject_ProcessEvent(UObject* object, UFunction* function, void* params) {
+    if (g_config.rpc_diagnostics_enabled && function) {
+        constexpr unsigned int kNet = static_cast<unsigned int>(EFunctionFlags::FUNC_Net);
+        constexpr unsigned int kReliable = static_cast<unsigned int>(EFunctionFlags::FUNC_NetReliable);
+        const unsigned int flags = function->FunctionFlags;
+        if ((flags & kNet) != 0 && (flags & kReliable) != 0) {
+            ReliableRpcStats& stats = g_reliable_rpc_stats[function];
+            if (stats.function_name.empty()) {
+                stats.function_name = GetObjectFullName(function);
+                stats.object_class = GetClassFullName(object);
+            }
+            ++stats.window;
+            ++stats.total;
+        }
+    }
+    UObject_ProcessEvent_original(object, function, params);
+}
+
 bool g_inventory_max_hook_installed = false;
 bool g_inventory_add_hook_installed = false;
 bool g_inventory_remote_hook_installed = false;
@@ -1137,6 +1178,7 @@ bool g_rpc_diagnostics_hook_installed = false;
 bool g_do_fire_diagnostics_hook_installed = false;
 bool g_projectile_diagnostics_hook_installed = false;
 bool g_damage_diagnostics_hook_installed = false;
+bool g_process_event_diagnostics_hook_installed = false;
 
 void UninstallRpcDiagnosticsHook();
 
@@ -1148,10 +1190,10 @@ void ApplyRpcDiagnosticsHookState() {
             &APrimalStructureTurret_ClientsFireProjectile_Implementation_original);
         if (g_rpc_diagnostics_hook_installed) {
             Log::GetLog()->info(
-            "TurretControl v2.4: read-only turret firing diagnostics enabled");
+            "TurretControl v2.5: read-only turret firing diagnostics enabled");
         } else {
             Log::GetLog()->error(
-                "TurretControl v2.4: ClientsFireProjectile diagnostics hook installation failed");
+                "TurretControl v2.5: ClientsFireProjectile diagnostics hook installation failed");
         }
     }
 
@@ -1171,12 +1213,24 @@ void ApplyRpcDiagnosticsHookState() {
             "APrimalStructureTurret.DealDamage", &Hook_APrimalStructureTurret_DealDamage,
             &APrimalStructureTurret_DealDamage_original);
     }
+    if (g_config.rpc_diagnostics_enabled && !g_process_event_diagnostics_hook_installed) {
+        g_process_event_diagnostics_hook_installed = ArkApi::GetHooks().SetHook(
+            "UObject.ProcessEvent", &Hook_UObject_ProcessEvent,
+            &UObject_ProcessEvent_original);
+        if (g_process_event_diagnostics_hook_installed) {
+            Log::GetLog()->info(
+                "TurretControl v2.5: global reliable RPC census enabled");
+        } else {
+            Log::GetLog()->error(
+                "TurretControl v2.5: UObject.ProcessEvent diagnostics hook installation failed");
+        }
+    }
 
     if (g_config.rpc_diagnostics_enabled &&
         (!g_do_fire_diagnostics_hook_installed || !g_projectile_diagnostics_hook_installed ||
          !g_damage_diagnostics_hook_installed)) {
         Log::GetLog()->warn(
-            "TurretControl v2.4: one or more server-side firing diagnostic hooks failed (DoFire={}, Projectile={}, Damage={})",
+            "TurretControl v2.5: one or more server-side firing diagnostic hooks failed (DoFire={}, Projectile={}, Damage={})",
             g_do_fire_diagnostics_hook_installed, g_projectile_diagnostics_hook_installed,
             g_damage_diagnostics_hook_installed);
     }
@@ -1214,6 +1268,12 @@ void UninstallRpcDiagnosticsHook() {
             "APrimalStructureTurret.DealDamage", &Hook_APrimalStructureTurret_DealDamage);
         g_damage_diagnostics_hook_installed = false;
     }
+    if (g_process_event_diagnostics_hook_installed) {
+        ArkApi::GetHooks().DisableHook(
+            "UObject.ProcessEvent", &Hook_UObject_ProcessEvent);
+        g_process_event_diagnostics_hook_installed = false;
+    }
+    g_reliable_rpc_stats.clear();
 }
 
 void InstallPlacementHooks() {
@@ -1386,7 +1446,7 @@ void RestoreAllBatchedTurrets() {
     }
 
     Log::GetLog()->info(
-        "TurretControl v2.4: restored {} tracked turret(s); {} could not be safely re-discovered",
+        "TurretControl v2.5: restored {} tracked turret(s); {} could not be safely re-discovered",
         restored, g_turret_batch_states.size());
 }
 
@@ -1423,6 +1483,31 @@ void LogRpcDiagnostics() {
         stats->projectile_window = 0;
         stats->damage_window = 0;
     }
+
+    std::vector<ReliableRpcStats*> reliable_active;
+    reliable_active.reserve(g_reliable_rpc_stats.size());
+    for (auto& entry : g_reliable_rpc_stats) {
+        if (entry.second.window > 0) reliable_active.push_back(&entry.second);
+    }
+    std::sort(reliable_active.begin(), reliable_active.end(),
+        [](const ReliableRpcStats* a, const ReliableRpcStats* b) {
+            return a->window > b->window;
+        });
+
+    constexpr std::size_t kMaxReliableRows = 25;
+    Log::GetLog()->info(
+        "TurretControl.ReliableRpcStats: window={}s activeFunctions={} showingTop={}",
+        seconds, reliable_active.size(), std::min(kMaxReliableRows, reliable_active.size()));
+    for (std::size_t index = 0;
+         index < reliable_active.size() && index < kMaxReliableRows; ++index) {
+        ReliableRpcStats* stats = reliable_active[index];
+        Log::GetLog()->info(
+            "TurretControl.ReliableRpcStats: function='{}' objectClass='{}' calls={} ({:.2f}/s) total={}",
+            stats->function_name, stats->object_class, stats->window,
+            static_cast<double>(stats->window) / static_cast<double>(seconds),
+            stats->total);
+    }
+    for (ReliableRpcStats* stats : reliable_active) stats->window = 0;
 }
 
 void HardCapTimer() {
@@ -1567,7 +1652,7 @@ void HardCapTimer() {
     }
     if (batched_turrets > 0) {
         Log::GetLog()->info(
-            "TurretControl v2.4: grouped {} shots into one real firing cycle on {} turret(s)",
+            "TurretControl v2.5: grouped {} shots into one real firing cycle on {} turret(s)",
             std::clamp(g_config.shots_per_network_event, 2, 5), batched_turrets);
     }
 }
@@ -1595,7 +1680,7 @@ void RuntimeTimer() {
         ApplyInventoryHookState();
         ApplyRpcDiagnosticsHookState();
         Log::GetLog()->info(
-            "TurretControl v2.4 runtime enabled after world startup (InventoryCap={}, HardCap={}, DisableClientProjectileEffects={}, ShotBatching={}, BatchSize={}, RpcDiagnostics={})",
+            "TurretControl v2.5 runtime enabled after world startup (InventoryCap={}, HardCap={}, DisableClientProjectileEffects={}, ShotBatching={}, BatchSize={}, RpcDiagnostics={})",
             g_config.inventory_cap_enabled, g_config.hard_cap_enabled,
             g_config.disable_client_projectile_effects,
             g_config.shot_batching_enabled, g_config.shots_per_network_event,
@@ -1886,7 +1971,7 @@ void Load() {
     ArkApi::GetCommands().AddOnTimerCallback("TurretControl.Runtime", &RuntimeTimer);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.Reload", &ReloadCommand);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.DumpTurrets", &DumpTurretsCommand);
-    Log::GetLog()->info("Loaded plugin - TurretControl v2.4 MeasuredShotGrouping");
+    Log::GetLog()->info("Loaded plugin - TurretControl v2.5 ReliableRpcCensus");
 }
 
 void Unload() {
