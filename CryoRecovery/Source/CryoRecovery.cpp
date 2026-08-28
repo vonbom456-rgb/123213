@@ -19,14 +19,14 @@ namespace CryoRecovery {
 
 struct Config {
     bool enabled = true;
-    float heal_percent_per_minute = 2.0f;
-    float pvp_heal_percent_per_minute = 1.5f;
+    float heal_percent_per_minute = 5.0f;
+    float pvp_heal_percent_per_minute = 4.0f;
     int minimum_stored_seconds = 5;
     float maximum_counted_hours = 24.0f;
     float post_spawn_apply_delay_seconds = 3.0f;
     bool daeodon_enabled = true;
-    float daeodon_heal_multiplier = 3.0f;
-    float daeodon_pvp_heal_multiplier = 2.25f;
+    float daeodon_heal_multiplier = 5.0f;
+    float daeodon_pvp_heal_multiplier = 4.0f;
     std::vector<std::string> daeodon_buff_name_tokens{
         "daeodon", "daedon", "pig_healing", "pig healing"};
     bool notify_player = true;

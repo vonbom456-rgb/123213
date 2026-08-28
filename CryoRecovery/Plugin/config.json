@@ -1,16 +1,16 @@
 {
   "CryopodHealing": {
     "Enabled": true,
-    "HealPercentPerMinute": 2.0,
-    "PvpHealPercentPerMinute": 1.5,
+    "HealPercentPerMinute": 5.0,
+    "PvpHealPercentPerMinute": 4.0,
     "MinimumStoredSeconds": 5,
     "MaximumCountedHours": 24.0,
     "PostSpawnApplyDelaySeconds": 3.0
   },
   "DaeodonHealing": {
     "Enabled": true,
-    "HealMultiplier": 3.0,
-    "PvpHealMultiplier": 2.25,
+    "HealMultiplier": 5.0,
+    "PvpHealMultiplier": 4.0,
     "BuffNameTokens": [
       "daeodon",
       "daedon",
