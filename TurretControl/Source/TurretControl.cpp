@@ -47,6 +47,9 @@ struct Config {
     // to nearby clients, which can overflow ASE's reliable network queue
     // when a large S+ turret wall fires at one target.
     bool disable_client_projectile_effects = true;
+    float network_scan_radius = 12000.0f;
+    bool shot_batching_enabled = true;
+    int shots_per_network_event = 3;
 
     bool pvp_placement_cooldown_enabled = true;
     float pvp_placement_cooldown_seconds = 3.0f;
@@ -118,6 +121,14 @@ using PvpCooldownChecker = bool(__fastcall*)(AShooterPlayerController*);
 PvpCooldownChecker g_pvp_checker = nullptr;
 
 std::unordered_map<uint64, std::chrono::steady_clock::time_point> g_last_pvp_defense_placement;
+
+struct TurretBatchState {
+    float fire_interval = 0.0f;
+    float fire_damage = 0.0f;
+    int ammo_per_shot = 0;
+};
+
+std::unordered_map<APrimalStructureTurret*, TurretBatchState> g_turret_batch_states;
 
 
 DECLARE_HOOK(UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity,
@@ -1106,9 +1117,48 @@ std::chrono::steady_clock::time_point g_runtime_enable_at{};
 bool g_world_ready_seen = false;
 bool g_runtime_ready = false;
 
+bool ApplyShotBatching(APrimalStructureTurret* turret) {
+    if (!turret) return false;
+
+    auto state_it = g_turret_batch_states.find(turret);
+    if (state_it == g_turret_batch_states.end()) {
+        const TurretBatchState original{
+            turret->FireIntervalField(),
+            turret->FireDamageAmountField(),
+            turret->NumBulletsPerShotField()
+        };
+        state_it = g_turret_batch_states.emplace(turret, original).first;
+    }
+
+    const TurretBatchState& original = state_it->second;
+    const int batch = std::clamp(g_config.shots_per_network_event, 2, 5);
+    const bool compatible = turret->bUseInstantDamageShooting().Get() &&
+        original.fire_interval > 0.0f && original.fire_damage > 0.0f &&
+        original.ammo_per_shot > 0;
+    const bool enough_ammo = turret->NumBulletsField() >= original.ammo_per_shot * batch;
+    const bool enable = g_config.shot_batching_enabled && compatible && enough_ammo;
+
+    const float desired_interval = enable
+        ? original.fire_interval * static_cast<float>(batch)
+        : original.fire_interval;
+    const float desired_damage = enable
+        ? original.fire_damage * static_cast<float>(batch)
+        : original.fire_damage;
+    const int desired_ammo = enable ? original.ammo_per_shot * batch : original.ammo_per_shot;
+
+    const bool changed = std::abs(turret->FireIntervalField() - desired_interval) > 0.0001f ||
+        std::abs(turret->FireDamageAmountField() - desired_damage) > 0.0001f ||
+        turret->NumBulletsPerShotField() != desired_ammo;
+    turret->FireIntervalField() = desired_interval;
+    turret->FireDamageAmountField() = desired_damage;
+    turret->NumBulletsPerShotField() = desired_ammo;
+    return enable && changed;
+}
+
 void HardCapTimer() {
     if (!g_runtime_ready ||
-        (!g_config.hard_cap_enabled && !g_config.disable_client_projectile_effects)) return;
+        (!g_config.hard_cap_enabled && !g_config.disable_client_projectile_effects &&
+         !g_config.shot_batching_enabled)) return;
 
     const auto now = std::chrono::steady_clock::now();
     if (now < g_next_hard_cap_check) return;
@@ -1127,6 +1177,7 @@ void HardCapTimer() {
     std::unordered_map<int, std::vector<RefundTarget>> refund_targets;
     std::vector<FVector> scan_origins;
     int disabled_client_effects = 0;
+    int batched_turrets = 0;
 
     // Build the owner/refund lookup before scanning any turret. Previously an
     // enemy controller could encounter the turret first, mark it checked and
@@ -1155,7 +1206,8 @@ void HardCapTimer() {
         TArray<AActor*> actors;
         TSubclassOf<AActor> turret_class(APrimalStructureTurret::GetPrivateStaticClass());
         UVictoryCore::ServerOctreeOverlapActorsClass(
-            &actors, world, pos, g_config.hard_cap_scan_radius,
+            &actors, world, pos,
+            std::max(g_config.hard_cap_scan_radius, g_config.network_scan_radius),
             EServerOctreeGroup::STRUCTURES, turret_class, true);
 
         for (AActor* actor : actors) {
@@ -1171,6 +1223,8 @@ void HardCapTimer() {
                     ++disabled_client_effects;
                 }
             }
+
+            if (ApplyShotBatching(turret)) ++batched_turrets;
 
             if (!g_config.hard_cap_enabled) continue;
 
@@ -1227,6 +1281,11 @@ void HardCapTimer() {
             "TurretControl v2.0 network guard: disabled per-shot client projectile effects on {} turret(s)",
             disabled_client_effects);
     }
+    if (batched_turrets > 0) {
+        Log::GetLog()->info(
+            "TurretControl v2.1 shot batching: grouped {} shots per event on {} turret(s)",
+            std::clamp(g_config.shots_per_network_event, 2, 5), batched_turrets);
+    }
 }
 
 // Do not install the global inventory hook or scan structures while ARK is
@@ -1251,9 +1310,10 @@ void RuntimeTimer() {
         g_runtime_ready = true;
         ApplyInventoryHookState();
         Log::GetLog()->info(
-            "TurretControl v2.0 runtime enabled after world startup (InventoryCap={}, HardCap={}, DisableClientProjectileEffects={})",
+            "TurretControl v2.1 runtime enabled after world startup (InventoryCap={}, HardCap={}, DisableClientProjectileEffects={}, ShotBatching={}, BatchSize={})",
             g_config.inventory_cap_enabled, g_config.hard_cap_enabled,
-            g_config.disable_client_projectile_effects);
+            g_config.disable_client_projectile_effects,
+            g_config.shot_batching_enabled, g_config.shots_per_network_event);
     }
 
     if (g_runtime_ready) HardCapTimer();
@@ -1302,6 +1362,12 @@ Config ParseConfig(const minijson::Value& root) {
     c.disable_client_projectile_effects = minijson::boolean(
         root, "NetworkOptimization", "DisableClientProjectileEffects",
         c.disable_client_projectile_effects);
+    c.network_scan_radius = minijson::number(
+        root, "NetworkOptimization", "ScanRadius", c.network_scan_radius);
+    c.shot_batching_enabled = minijson::boolean(
+        root, "NetworkOptimization", "ShotBatchingEnabled", c.shot_batching_enabled);
+    c.shots_per_network_event = minijson::integer(
+        root, "NetworkOptimization", "ShotsPerNetworkEvent", c.shots_per_network_event);
 
     c.pvp_placement_cooldown_enabled = minijson::boolean(
         root, "PvpPlacementCooldown", "Enabled", c.pvp_placement_cooldown_enabled);
@@ -1361,6 +1427,8 @@ Config ParseConfig(const minijson::Value& root) {
     c.hard_cap_interval_seconds = std::max(1, c.hard_cap_interval_seconds);
     c.hard_cap_scan_radius = std::max(1000.0f, c.hard_cap_scan_radius);
     c.startup_delay_seconds = std::max(0, c.startup_delay_seconds);
+    c.network_scan_radius = std::max(1000.0f, c.network_scan_radius);
+    c.shots_per_network_event = std::clamp(c.shots_per_network_event, 2, 5);
     c.pvp_placement_cooldown_seconds = std::max(0.0f, c.pvp_placement_cooldown_seconds);
     c.fill_notification_scale = std::max(0.1f, c.fill_notification_scale);
     c.fill_notification_time = std::max(0.1f, c.fill_notification_time);
@@ -1441,10 +1509,11 @@ void Load() {
     g_placement_check_hook_installed = false;
     g_placed_structure_hook_installed = false;
     g_last_pvp_defense_placement.clear();
+    g_turret_batch_states.clear();
     InstallPlacementHooks();
     ArkApi::GetCommands().AddOnTimerCallback("TurretControl.Runtime", &RuntimeTimer);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.Reload", &ReloadCommand);
-    Log::GetLog()->info("Loaded plugin - TurretControl v2.0 ReliableBufferGuard");
+    Log::GetLog()->info("Loaded plugin - TurretControl v2.1 ShotBatching");
 }
 
 void Unload() {
@@ -1469,6 +1538,7 @@ void Unload() {
     ArkApi::GetCommands().RemoveConsoleCommand("TurretControl.Reload");
     g_pvp_checker = nullptr;
     g_last_pvp_defense_placement.clear();
+    g_turret_batch_states.clear();
     g_custom_heavy.clear(); g_custom_tek.clear(); g_custom_auto.clear();
 }
 

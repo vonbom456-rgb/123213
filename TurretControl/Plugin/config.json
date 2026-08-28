@@ -31,7 +31,10 @@
     ]
   },
   "NetworkOptimization": {
-    "DisableClientProjectileEffects": true
+    "DisableClientProjectileEffects": true,
+    "ScanRadius": 12000,
+    "ShotBatchingEnabled": true,
+    "ShotsPerNetworkEvent": 3
   },
   "FillRadiusHologram": {
     "Enabled": true,

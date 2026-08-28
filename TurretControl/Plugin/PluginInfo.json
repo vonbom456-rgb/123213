@@ -1,7 +1,7 @@
 {
   "FullName": "TurretControl",
-  "Description": "Turret controls, ammo caps, PvP placement cooldown and reliable-buffer protection for ARK: Survival Evolved",
-  "Version": 2.0,
+  "Description": "Turret controls, ammo caps, PvP placement cooldown and network-safe shot batching for ARK: Survival Evolved",
+  "Version": 2.1,
   "MinApiVersion": 3.56,
   "Dependencies": []
 }
