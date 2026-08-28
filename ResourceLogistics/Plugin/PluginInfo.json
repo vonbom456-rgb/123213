@@ -1,5 +1,6 @@
 {
   "FullName": "ResourceLogistics",
   "Description": "Safe resource pull and Dedicated Storage distribution",
-  "Version": "1.0"
+  "Version": 1.0,
+  "MinApiVersion": 3.56
 }

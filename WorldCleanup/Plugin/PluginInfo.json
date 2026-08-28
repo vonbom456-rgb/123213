@@ -1,1 +1,1 @@
-{"FullName":"WorldCleanup","Description":"Conservative cleanup of empty drops, death caches and corpses","Version":"1.0"}
+{"FullName":"WorldCleanup","Description":"Conservative cleanup of empty drops, death caches and corpses","Version":1.0,"MinApiVersion":3.56}

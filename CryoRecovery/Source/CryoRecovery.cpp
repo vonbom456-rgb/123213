@@ -493,7 +493,7 @@ void StatusCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type) 
 
 void Load() {
     Log::Get().Init("CryoRecovery");
-    Log::GetLog()->info("Loading plugin - CryoRecovery v1.2 PostSpawnHealthFix");
+    Log::GetLog()->info("Loading plugin - CryoRecovery v1.3 StatusAndPvpLimits");
     try { CryoRecovery::ReadConfig(); }
     catch (const std::exception& error) {
         Log::GetLog()->error("CryoRecovery: config error ({}), using defaults", error.what());
