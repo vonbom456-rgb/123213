@@ -1,11 +1,15 @@
 {
   "CryopodHealing": {
     "Enabled": true,
-    "HealPercentPerMinute": 5.0,
-    "PvpHealPercentPerMinute": 4.0,
+    "HealPercentPerMinute": 3.0,
+    "PvpHealPercentPerMinute": 2.5,
     "MinimumStoredSeconds": 5,
     "MaximumCountedHours": 24.0,
-    "PostSpawnApplyDelaySeconds": 3.0
+    "PostSpawnApplyDelaySeconds": 3.0,
+    "RestoreStamina": true,
+    "RestoreOxygen": true,
+    "RestoreFood": true,
+    "RestoreWater": true
   },
   "DaeodonHealing": {
     "Enabled": true,

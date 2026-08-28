@@ -19,8 +19,8 @@ namespace CryoRecovery {
 
 struct Config {
     bool enabled = true;
-    float heal_percent_per_minute = 5.0f;
-    float pvp_heal_percent_per_minute = 4.0f;
+    float heal_percent_per_minute = 3.0f;
+    float pvp_heal_percent_per_minute = 2.5f;
     int minimum_stored_seconds = 5;
     float maximum_counted_hours = 24.0f;
     float post_spawn_apply_delay_seconds = 3.0f;
@@ -32,6 +32,10 @@ struct Config {
     bool notify_player = true;
     std::string status_command = "/cryoheal";
     std::string healed_message = "Cryopod recovery: +{0} HP ({1}% total).";
+    bool restore_stamina = true;
+    bool restore_oxygen = true;
+    bool restore_food = true;
+    bool restore_water = true;
     bool release_limit_enabled = true;
     int release_window_seconds = 30;
     int max_releases = 10;
@@ -133,6 +137,10 @@ void ReadConfig() {
     value.notify_player = minijson::boolean(root, "Messages", "NotifyPlayer", value.notify_player);
     value.status_command = minijson::str(root, "Messages", "StatusCommand", value.status_command);
     value.healed_message = minijson::str(root, "Messages", "Healed", value.healed_message);
+    value.restore_stamina = minijson::boolean(root, "CryopodHealing", "RestoreStamina", value.restore_stamina);
+    value.restore_oxygen = minijson::boolean(root, "CryopodHealing", "RestoreOxygen", value.restore_oxygen);
+    value.restore_food = minijson::boolean(root, "CryopodHealing", "RestoreFood", value.restore_food);
+    value.restore_water = minijson::boolean(root, "CryopodHealing", "RestoreWater", value.restore_water);
     value.release_limit_enabled = minijson::boolean(root, "PvpReleaseLimit", "Enabled", value.release_limit_enabled);
     value.release_window_seconds = minijson::integer(root, "PvpReleaseLimit", "WindowSeconds", value.release_window_seconds);
     value.max_releases = minijson::integer(root, "PvpReleaseLimit", "MaxTotalReleases", value.max_releases);
@@ -373,15 +381,37 @@ void RecoveryTimer() {
         const float new_health = std::min(max_health, base_health + heal_amount);
         const float applied = std::max(0.0f, new_health - current_health);
 
+        UPrimalCharacterStatusComponent* status = dino->MyCharacterStatusComponentField();
+        const auto restore_stat = [&](EPrimalCharacterStatusValue::Type stat, bool enabled) {
+            if (!enabled || !status) return 0.0f;
+            const float stat_max = dino->GetMaxStatusValue(stat);
+            const float stat_current = dino->GetCurrentStatusValue(stat);
+            if (stat_max <= 0.0f || stat_current >= stat_max) return 0.0f;
+            const float stat_new = std::min(stat_max,
+                stat_current + static_cast<float>(stat_max * healed_percent / 100.0));
+            status->BPDirectSetCurrentStatusValue(stat, stat_new);
+            return std::max(0.0f, stat_new - stat_current);
+        };
+
+        const float stamina_applied = restore_stat(
+            EPrimalCharacterStatusValue::Stamina, g_config.restore_stamina);
+        const float oxygen_applied = restore_stat(
+            EPrimalCharacterStatusValue::Oxygen, g_config.restore_oxygen);
+        const float food_applied = restore_stat(
+            EPrimalCharacterStatusValue::Food, g_config.restore_food);
+        const float water_applied = restore_stat(
+            EPrimalCharacterStatusValue::Water, g_config.restore_water);
+
         if (max_health > 0.0f && applied > 0.0f) {
             // SpawnFromDinoDataEx returns before ARK/S+ has finished recalculating
             // the dino's status component. Applying health here prevents that
             // post-spawn recalculation from overwriting cryopod recovery.
             dino->SetHealth(new_health);
             Log::GetLog()->info(
-                "CryoRecovery: delayed release heal id={}:{} stored={}s pvp={} rate={}%%/min health={} -> {} / {}",
+                "CryoRecovery: delayed recovery id={}:{} stored={}s pvp={} rate={}%%/min health={} -> {} / {} stamina+{} oxygen+{} food+{} water+{}",
                 it->key.id1, it->key.id2, it->elapsed_seconds, it->pvp, it->rate,
-                current_health, new_health, max_health);
+                current_health, new_health, max_health, stamina_applied, oxygen_applied,
+                food_applied, water_applied);
 
             if (g_config.notify_player && controller) {
                 const int total_percent = static_cast<int>(
@@ -392,7 +422,8 @@ void RecoveryTimer() {
                 message = ReplaceToken(message, "{1}", std::to_string(total_percent));
                 Send(controller, message);
             }
-        } else {
+        } else if (stamina_applied <= 0.0f && oxygen_applied <= 0.0f &&
+                   food_applied <= 0.0f && water_applied <= 0.0f) {
             Log::GetLog()->info(
                 "CryoRecovery: no delayed heal needed id={}:{} health={} / {}",
                 it->key.id1, it->key.id2, current_health, max_health);
@@ -493,7 +524,7 @@ void StatusCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type) 
 
 void Load() {
     Log::Get().Init("CryoRecovery");
-    Log::GetLog()->info("Loading plugin - CryoRecovery v1.3 StatusAndPvpLimits");
+    Log::GetLog()->info("Loading plugin - CryoRecovery v1.4 SafeStatRecovery");
     try { CryoRecovery::ReadConfig(); }
     catch (const std::exception& error) {
         Log::GetLog()->error("CryoRecovery: config error ({}), using defaults", error.what());
@@ -534,7 +565,7 @@ void Load() {
             &CryoRecovery::StatusCommand);
     }
     Log::GetLog()->info(
-        "CryoRecovery v1.3 ready (cryo={}%%/min, PvP cryo={}%%/min, apply_delay={}s, Daeodon=x{}, PvP Daeodon=x{}, release_limit={}/{}, capture_hook={}, spawn_hook={}, health_hook={}, can_use_hook={})",
+        "CryoRecovery v1.4 ready (cryo={}%%/min, PvP cryo={}%%/min, apply_delay={}s, Daeodon=x{}, PvP Daeodon=x{}, release_limit={}/{}, capture_hook={}, spawn_hook={}, health_hook={}, can_use_hook={})",
         CryoRecovery::g_config.heal_percent_per_minute,
         CryoRecovery::g_config.pvp_heal_percent_per_minute,
         CryoRecovery::g_config.post_spawn_apply_delay_seconds,
