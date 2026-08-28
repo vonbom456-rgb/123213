@@ -2,6 +2,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
 #include <fstream>
@@ -48,8 +49,13 @@ struct Config {
     // when a large S+ turret wall fires at one target.
     bool disable_client_projectile_effects = true;
     float network_scan_radius = 12000.0f;
-    bool shot_batching_enabled = true;
+    // The old field-only batching experiment is retained in the config for
+    // backwards compatibility but is forced off in v2.2. It multiplied live
+    // turret fields without proving that reliable RPC traffic was reduced.
+    bool shot_batching_enabled = false;
     int shots_per_network_event = 3;
+    bool rpc_diagnostics_enabled = true;
+    int rpc_log_interval_seconds = 10;
 
     bool pvp_placement_cooldown_enabled = true;
     float pvp_placement_cooldown_seconds = 3.0f;
@@ -130,6 +136,15 @@ struct TurretBatchState {
 
 std::unordered_map<APrimalStructureTurret*, TurretBatchState> g_turret_batch_states;
 
+struct TurretRpcStats {
+    std::string class_name;
+    std::uint64_t interval_calls = 0;
+    std::uint64_t total_calls = 0;
+};
+
+std::unordered_map<UClass*, TurretRpcStats> g_turret_rpc_stats;
+std::chrono::steady_clock::time_point g_next_rpc_log = std::chrono::steady_clock::now();
+
 
 DECLARE_HOOK(UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity,
     bool,
@@ -168,6 +183,14 @@ DECLARE_HOOK(APrimalStructure_PlacedStructure,
     void,
     APrimalStructure*,
     AShooterPlayerController*);
+
+// Exact ASE ArkApi 3.56 signature from API/ARK/PrimalStructure.h.
+// This hook is diagnostic-only: it always calls the original implementation.
+DECLARE_HOOK(APrimalStructureTurret_ClientsFireProjectile_Implementation,
+    void,
+    APrimalStructureTurret*,
+    FVector,
+    FVector_NetQuantizeNormal);
 
 std::string ConfigPath() {
     return ArkApi::Tools::GetCurrentDir() + "/ArkApi/Plugins/TurretControl/config.json";
@@ -1022,11 +1045,62 @@ bool Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity(
     return allowed > 0;
 }
 
+void Hook_APrimalStructureTurret_ClientsFireProjectile_Implementation(
+    APrimalStructureTurret* turret,
+    FVector origin,
+    FVector_NetQuantizeNormal shoot_dir)
+{
+    if (g_config.rpc_diagnostics_enabled && turret) {
+        UClass* cls = turret->ClassField();
+        TurretRpcStats& stats = g_turret_rpc_stats[cls];
+        if (stats.class_name.empty()) stats.class_name = GetClassFullName(cls);
+        ++stats.interval_calls;
+        ++stats.total_calls;
+    }
+
+    // Read-only diagnostics: never suppress or alter the multicast call.
+    APrimalStructureTurret_ClientsFireProjectile_Implementation_original(
+        turret, origin, shoot_dir);
+}
+
 bool g_inventory_max_hook_installed = false;
 bool g_inventory_add_hook_installed = false;
 bool g_inventory_remote_hook_installed = false;
 bool g_placement_check_hook_installed = false;
 bool g_placed_structure_hook_installed = false;
+bool g_rpc_diagnostics_hook_installed = false;
+
+void ApplyRpcDiagnosticsHookState() {
+    if (g_config.rpc_diagnostics_enabled && !g_rpc_diagnostics_hook_installed) {
+        g_rpc_diagnostics_hook_installed = ArkApi::GetHooks().SetHook(
+            "APrimalStructureTurret.ClientsFireProjectile_Implementation",
+            &Hook_APrimalStructureTurret_ClientsFireProjectile_Implementation,
+            &APrimalStructureTurret_ClientsFireProjectile_Implementation_original);
+        if (g_rpc_diagnostics_hook_installed) {
+            Log::GetLog()->info(
+                "TurretControl v2.2: read-only ClientsFireProjectile diagnostics enabled");
+        } else {
+            Log::GetLog()->error(
+                "TurretControl v2.2: ClientsFireProjectile diagnostics hook installation failed");
+        }
+    }
+
+    if (!g_config.rpc_diagnostics_enabled && g_rpc_diagnostics_hook_installed) {
+        ArkApi::GetHooks().DisableHook(
+            "APrimalStructureTurret.ClientsFireProjectile_Implementation",
+            &Hook_APrimalStructureTurret_ClientsFireProjectile_Implementation);
+        g_rpc_diagnostics_hook_installed = false;
+        g_turret_rpc_stats.clear();
+    }
+}
+
+void UninstallRpcDiagnosticsHook() {
+    if (!g_rpc_diagnostics_hook_installed) return;
+    ArkApi::GetHooks().DisableHook(
+        "APrimalStructureTurret.ClientsFireProjectile_Implementation",
+        &Hook_APrimalStructureTurret_ClientsFireProjectile_Implementation);
+    g_rpc_diagnostics_hook_installed = false;
+}
 
 void InstallPlacementHooks() {
     if (!g_placement_check_hook_installed) {
@@ -1117,48 +1191,99 @@ std::chrono::steady_clock::time_point g_runtime_enable_at{};
 bool g_world_ready_seen = false;
 bool g_runtime_ready = false;
 
-bool ApplyShotBatching(APrimalStructureTurret* turret) {
-    if (!turret) return false;
+// v2.1 attempted to batch shots by multiplying FireInterval,
+// FireDamageAmount and NumBulletsPerShot. NumBulletsPerShot semantics are not
+// documented well enough to prove that this reduces RPCs, and the combination
+// could multiply damage twice. v2.2 deliberately performs no field batching.
+bool ApplyShotBatching(APrimalStructureTurret*) {
+    return false;
+}
 
-    auto state_it = g_turret_batch_states.find(turret);
-    if (state_it == g_turret_batch_states.end()) {
-        const TurretBatchState original{
-            turret->FireIntervalField(),
-            turret->FireDamageAmountField(),
-            turret->NumBulletsPerShotField()
-        };
-        state_it = g_turret_batch_states.emplace(turret, original).first;
+// Restore only pointers re-discovered through a fresh world octree scan. Raw
+// pointers kept in the old state map may refer to destroyed actors and must not
+// be dereferenced directly.
+void RestoreAllBatchedTurrets() {
+    if (g_turret_batch_states.empty()) return;
+
+    UWorld* world = ArkApi::GetApiUtils().GetWorld();
+    if (!world) return;
+
+    std::vector<FVector> origins;
+    for (TWeakObjectPtr<APlayerController> weak_pc : world->PlayerControllerListField()) {
+        APlayerController* base_pc = weak_pc.Get();
+        if (!base_pc || !base_pc->IsA(AShooterPlayerController::GetPrivateStaticClass())) continue;
+        auto* pc = static_cast<AShooterPlayerController*>(base_pc);
+        AShooterCharacter* character = pc->GetPlayerCharacter();
+        if (character && character->RootComponentField()) {
+            origins.push_back(character->RootComponentField()->RelativeLocationField());
+        }
     }
 
-    const TurretBatchState& original = state_it->second;
-    const int batch = std::clamp(g_config.shots_per_network_event, 2, 5);
-    const bool compatible = turret->bUseInstantDamageShooting().Get() &&
-        original.fire_interval > 0.0f && original.fire_damage > 0.0f &&
-        original.ammo_per_shot > 0;
-    const bool enough_ammo = turret->NumBulletsField() >= original.ammo_per_shot * batch;
-    const bool enable = g_config.shot_batching_enabled && compatible && enough_ammo;
+    int restored = 0;
+    std::unordered_set<APrimalStructureTurret*> visited;
+    for (const FVector& origin : origins) {
+        TArray<AActor*> actors;
+        TSubclassOf<AActor> turret_class(APrimalStructureTurret::GetPrivateStaticClass());
+        UVictoryCore::ServerOctreeOverlapActorsClass(
+            &actors, world, origin,
+            std::max(g_config.hard_cap_scan_radius, g_config.network_scan_radius),
+            EServerOctreeGroup::STRUCTURES, turret_class, true);
 
-    const float desired_interval = enable
-        ? original.fire_interval * static_cast<float>(batch)
-        : original.fire_interval;
-    const float desired_damage = enable
-        ? original.fire_damage * static_cast<float>(batch)
-        : original.fire_damage;
-    const int desired_ammo = enable ? original.ammo_per_shot * batch : original.ammo_per_shot;
+        for (AActor* actor : actors) {
+            if (!actor || !actor->IsA(APrimalStructureTurret::GetPrivateStaticClass())) continue;
+            auto* turret = static_cast<APrimalStructureTurret*>(actor);
+            if (!visited.insert(turret).second) continue;
+            auto it = g_turret_batch_states.find(turret);
+            if (it == g_turret_batch_states.end()) continue;
+            turret->FireIntervalField() = it->second.fire_interval;
+            turret->FireDamageAmountField() = it->second.fire_damage;
+            turret->NumBulletsPerShotField() = it->second.ammo_per_shot;
+            g_turret_batch_states.erase(it);
+            ++restored;
+        }
+    }
 
-    const bool changed = std::abs(turret->FireIntervalField() - desired_interval) > 0.0001f ||
-        std::abs(turret->FireDamageAmountField() - desired_damage) > 0.0001f ||
-        turret->NumBulletsPerShotField() != desired_ammo;
-    turret->FireIntervalField() = desired_interval;
-    turret->FireDamageAmountField() = desired_damage;
-    turret->NumBulletsPerShotField() = desired_ammo;
-    return enable && changed;
+    Log::GetLog()->info(
+        "TurretControl v2.2: restored {} tracked turret(s); {} could not be safely re-discovered",
+        restored, g_turret_batch_states.size());
+}
+
+void LogRpcDiagnostics() {
+    if (!g_config.rpc_diagnostics_enabled || !g_rpc_diagnostics_hook_installed) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < g_next_rpc_log) return;
+    const int seconds = std::max(1, g_config.rpc_log_interval_seconds);
+    g_next_rpc_log = now + std::chrono::seconds(seconds);
+
+    std::vector<TurretRpcStats*> active;
+    std::uint64_t interval_total = 0;
+    for (auto& entry : g_turret_rpc_stats) {
+        if (entry.second.interval_calls == 0) continue;
+        active.push_back(&entry.second);
+        interval_total += entry.second.interval_calls;
+    }
+    std::sort(active.begin(), active.end(), [](const TurretRpcStats* a, const TurretRpcStats* b) {
+        return a->interval_calls > b->interval_calls;
+    });
+
+    if (!active.empty()) {
+        Log::GetLog()->info(
+            "TurretControl.RpcStats: window={}s calls={} classes={}",
+            seconds, interval_total, active.size());
+        for (TurretRpcStats* stats : active) {
+            Log::GetLog()->info(
+                "TurretControl.RpcStats: class='{}' calls={} rate={:.2f}/s total={}",
+                stats->class_name, stats->interval_calls,
+                static_cast<double>(stats->interval_calls) / static_cast<double>(seconds),
+                stats->total_calls);
+            stats->interval_calls = 0;
+        }
+    }
 }
 
 void HardCapTimer() {
     if (!g_runtime_ready ||
-        (!g_config.hard_cap_enabled && !g_config.disable_client_projectile_effects &&
-         !g_config.shot_batching_enabled)) return;
+        (!g_config.hard_cap_enabled && !g_config.disable_client_projectile_effects)) return;
 
     const auto now = std::chrono::steady_clock::now();
     if (now < g_next_hard_cap_check) return;
@@ -1177,7 +1302,6 @@ void HardCapTimer() {
     std::unordered_map<int, std::vector<RefundTarget>> refund_targets;
     std::vector<FVector> scan_origins;
     int disabled_client_effects = 0;
-    int batched_turrets = 0;
 
     // Build the owner/refund lookup before scanning any turret. Previously an
     // enemy controller could encounter the turret first, mark it checked and
@@ -1223,8 +1347,6 @@ void HardCapTimer() {
                     ++disabled_client_effects;
                 }
             }
-
-            if (ApplyShotBatching(turret)) ++batched_turrets;
 
             if (!g_config.hard_cap_enabled) continue;
 
@@ -1281,11 +1403,6 @@ void HardCapTimer() {
             "TurretControl v2.0 network guard: disabled per-shot client projectile effects on {} turret(s)",
             disabled_client_effects);
     }
-    if (batched_turrets > 0) {
-        Log::GetLog()->info(
-            "TurretControl v2.1 shot batching: grouped {} shots per event on {} turret(s)",
-            std::clamp(g_config.shots_per_network_event, 2, 5), batched_turrets);
-    }
 }
 
 // Do not install the global inventory hook or scan structures while ARK is
@@ -1309,14 +1426,18 @@ void RuntimeTimer() {
     if (!g_runtime_ready && now >= g_runtime_enable_at) {
         g_runtime_ready = true;
         ApplyInventoryHookState();
+        ApplyRpcDiagnosticsHookState();
         Log::GetLog()->info(
-            "TurretControl v2.1 runtime enabled after world startup (InventoryCap={}, HardCap={}, DisableClientProjectileEffects={}, ShotBatching={}, BatchSize={})",
+            "TurretControl v2.2 runtime enabled after world startup (InventoryCap={}, HardCap={}, DisableClientProjectileEffects={}, ShotBatchingForcedOff=true, RpcDiagnostics={})",
             g_config.inventory_cap_enabled, g_config.hard_cap_enabled,
             g_config.disable_client_projectile_effects,
-            g_config.shot_batching_enabled, g_config.shots_per_network_event);
+            g_config.rpc_diagnostics_enabled);
     }
 
-    if (g_runtime_ready) HardCapTimer();
+    if (g_runtime_ready) {
+        HardCapTimer();
+        LogRpcDiagnostics();
+    }
 }
 
 
@@ -1368,6 +1489,10 @@ Config ParseConfig(const minijson::Value& root) {
         root, "NetworkOptimization", "ShotBatchingEnabled", c.shot_batching_enabled);
     c.shots_per_network_event = minijson::integer(
         root, "NetworkOptimization", "ShotsPerNetworkEvent", c.shots_per_network_event);
+    c.rpc_diagnostics_enabled = minijson::boolean(
+        root, "NetworkOptimization", "RpcDiagnosticsEnabled", c.rpc_diagnostics_enabled);
+    c.rpc_log_interval_seconds = minijson::integer(
+        root, "NetworkOptimization", "RpcLogIntervalSeconds", c.rpc_log_interval_seconds);
 
     c.pvp_placement_cooldown_enabled = minijson::boolean(
         root, "PvpPlacementCooldown", "Enabled", c.pvp_placement_cooldown_enabled);
@@ -1429,6 +1554,7 @@ Config ParseConfig(const minijson::Value& root) {
     c.startup_delay_seconds = std::max(0, c.startup_delay_seconds);
     c.network_scan_radius = std::max(1000.0f, c.network_scan_radius);
     c.shots_per_network_event = std::clamp(c.shots_per_network_event, 2, 5);
+    c.rpc_log_interval_seconds = std::max(1, c.rpc_log_interval_seconds);
     c.pvp_placement_cooldown_seconds = std::max(0.0f, c.pvp_placement_cooldown_seconds);
     c.fill_notification_scale = std::max(0.1f, c.fill_notification_scale);
     c.fill_notification_time = std::max(0.1f, c.fill_notification_time);
@@ -1443,6 +1569,12 @@ void ReadConfig() {
     const minijson::Value root = minijson::parse(ss.str());
     if (!root.is_object()) throw std::runtime_error("config root must be a JSON object");
     g_config = ParseConfig(root);
+
+    if (g_config.shot_batching_enabled) {
+        Log::GetLog()->warn(
+            "TurretControl v2.2: ShotBatchingEnabled was requested but the unsafe field-only experiment is forced off");
+        g_config.shot_batching_enabled = false;
+    }
 
 #if !(defined(TURRETCONTROL_WITH_PERMISSIONS) && TURRETCONTROL_WITH_PERMISSIONS)
     if (g_config.use_permissions) {
@@ -1480,9 +1612,14 @@ void ReloadCommand(APlayerController* player_controller, FString*, bool) {
     try {
         const std::string old_fill = g_registered_fill_command;
         const std::string old_turrets = g_registered_turrets_command;
+        RestoreAllBatchedTurrets();
+        g_turret_batch_states.clear();
         ReadConfig();
         LoadCustomClasses();
-        if (g_runtime_ready) ApplyInventoryHookState();
+        if (g_runtime_ready) {
+            ApplyInventoryHookState();
+            ApplyRpcDiagnosticsHookState();
+        }
         if (g_config.fill_command != old_fill || g_config.turrets_command != old_turrets) {
             UnregisterChatCommands();
             RegisterChatCommands();
@@ -1493,6 +1630,72 @@ void ReloadCommand(APlayerController* player_controller, FString*, bool) {
         if (pc) ArkApi::GetApiUtils().SendServerMessage(pc, FColorList::Red, e.what());
         Log::GetLog()->error("TurretControl reload failed: {}", e.what());
     }
+}
+
+// Read-only server/RCON command. It scans around every online character and
+// logs runtime class information and the exact live turret fields.
+void DumpTurretsCommand(APlayerController*, FString*, bool) {
+    UWorld* world = ArkApi::GetApiUtils().GetWorld();
+    if (!world) {
+        Log::GetLog()->warn("TurretControl.DumpTurrets: world is not ready");
+        return;
+    }
+
+    std::vector<FVector> origins;
+    for (TWeakObjectPtr<APlayerController> weak_pc : world->PlayerControllerListField()) {
+        APlayerController* base_pc = weak_pc.Get();
+        if (!base_pc || !base_pc->IsA(AShooterPlayerController::GetPrivateStaticClass())) continue;
+        auto* pc = static_cast<AShooterPlayerController*>(base_pc);
+        AShooterCharacter* character = pc->GetPlayerCharacter();
+        if (character && character->RootComponentField()) {
+            origins.push_back(character->RootComponentField()->RelativeLocationField());
+        }
+    }
+
+    if (origins.empty()) {
+        Log::GetLog()->warn(
+            "TurretControl.DumpTurrets: no online character available as a scan origin");
+        return;
+    }
+
+    std::unordered_set<APrimalStructureTurret*> visited;
+    int dumped = 0;
+    for (const FVector& origin : origins) {
+        TArray<AActor*> actors;
+        TSubclassOf<AActor> turret_class(APrimalStructureTurret::GetPrivateStaticClass());
+        UVictoryCore::ServerOctreeOverlapActorsClass(
+            &actors, world, origin, g_config.network_scan_radius,
+            EServerOctreeGroup::STRUCTURES, turret_class, true);
+
+        for (AActor* actor : actors) {
+            if (!actor || !actor->IsA(APrimalStructureTurret::GetPrivateStaticClass())) continue;
+            auto* turret = static_cast<APrimalStructureTurret*>(actor);
+            if (!visited.insert(turret).second || !IsValidTurret(turret)) continue;
+
+            UClass* runtime_class = turret->ClassField();
+            UClass* parent_class = runtime_class
+                ? static_cast<UClass*>(runtime_class->SuperStructField()) : nullptr;
+            const TurretKind kind = DetectTurretKind(turret);
+            const auto state_it = g_turret_batch_states.find(turret);
+            const bool tracked = state_it != g_turret_batch_states.end();
+
+            Log::GetLog()->info(
+                "TurretControl.DumpTurrets: class='{}' parent='{}' ammo='{}' kind={} "
+                "instant={} clientProjectile={} interval={:.4f} damage={:.2f} "
+                "bulletsPerShot={} ammoCount={} trackedOldBatch={}",
+                GetClassFullName(runtime_class), GetClassFullName(parent_class),
+                GetClassFullName(turret->AmmoItemTemplateField().uClass),
+                static_cast<int>(kind), turret->bUseInstantDamageShooting().Get(),
+                turret->bClientFireProjectile().Get(), turret->FireIntervalField(),
+                turret->FireDamageAmountField(), turret->NumBulletsPerShotField(),
+                turret->NumBulletsField(), tracked);
+            ++dumped;
+        }
+    }
+
+    Log::GetLog()->info(
+        "TurretControl.DumpTurrets: dumped {} turret(s) within {:.0f} uu of {} online scan origin(s)",
+        dumped, g_config.network_scan_radius, origins.size());
 }
 
 void Load() {
@@ -1508,17 +1711,23 @@ void Load() {
     g_inventory_remote_hook_installed = false;
     g_placement_check_hook_installed = false;
     g_placed_structure_hook_installed = false;
+    g_rpc_diagnostics_hook_installed = false;
     g_last_pvp_defense_placement.clear();
     g_turret_batch_states.clear();
+    g_turret_rpc_stats.clear();
+    g_next_rpc_log = std::chrono::steady_clock::now();
     InstallPlacementHooks();
     ArkApi::GetCommands().AddOnTimerCallback("TurretControl.Runtime", &RuntimeTimer);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.Reload", &ReloadCommand);
-    Log::GetLog()->info("Loaded plugin - TurretControl v2.1 ShotBatching");
+    ArkApi::GetCommands().AddConsoleCommand("TurretControl.DumpTurrets", &DumpTurretsCommand);
+    Log::GetLog()->info("Loaded plugin - TurretControl v2.2 RpcDiagnostics");
 }
 
 void Unload() {
+    RestoreAllBatchedTurrets();
     UnregisterChatCommands();
     UninstallPlacementHooks();
+    UninstallRpcDiagnosticsHook();
     if (g_inventory_max_hook_installed) {
         ArkApi::GetHooks().DisableHook("UPrimalInventoryComponent.AllowAddInventoryItem_MaxQuantity",
             &Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity);
@@ -1536,9 +1745,11 @@ void Unload() {
     }
     ArkApi::GetCommands().RemoveOnTimerCallback("TurretControl.Runtime");
     ArkApi::GetCommands().RemoveConsoleCommand("TurretControl.Reload");
+    ArkApi::GetCommands().RemoveConsoleCommand("TurretControl.DumpTurrets");
     g_pvp_checker = nullptr;
     g_last_pvp_defense_placement.clear();
     g_turret_batch_states.clear();
+    g_turret_rpc_stats.clear();
     g_custom_heavy.clear(); g_custom_tek.clear(); g_custom_auto.clear();
 }
 
