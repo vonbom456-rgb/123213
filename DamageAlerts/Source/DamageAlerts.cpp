@@ -336,7 +336,13 @@ void RecordDamage(AActor* target, AController* event_instigator, AActor* damage_
     // tribe and the damage came from a genuinely different tribe.
     const bool enemy_tribe_damage = IsPlayerOwnedTeam(target_team) &&
         IsPlayerOwnedTeam(attacker.team) && attacker.team != target_team;
-    if (enemy_tribe_damage) {
+    // Apply the turret category switches to the victim side as well.  The
+    // previous implementation suppressed the owner's number but still sent
+    // one reliable ClientAddFloatingDamageText RPC to every victim-tribe
+    // player for every turret projectile.  A large turret wall could therefore
+    // overflow the client's reliable network buffer even though all three
+    // ShowTurretDamageTo* settings were false.
+    if (enemy_tribe_damage && (!automated_turret_hit || turret_category_enabled)) {
         SendEnemyFloatingDamage(target, target_team, attacker.team, amount, cat);
     }
     if (g_config.notify_victim_tribe && enemy_tribe_damage) {
@@ -563,7 +569,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
     }
 
     std::ostringstream status;
-    status << "DamageNumbers v2.5 NativeTurretSpamFix OK | native="
+    status << "DamageNumbers v2.6 TurretRpcOverflowFix OK | native="
            << (g_config.disable_native_server_setting ? "OFF" :
                (g_native_floating_applied ? "ON" : "WAIT"))
            << " | character_hits=" << g_character_damage_events
@@ -576,7 +582,7 @@ void SelfTestCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type
 
 void Load() {
     Log::Get().Init("DamageNumbers");
-    Log::GetLog()->info("Loading plugin - DamageNumbers v2.5 NativeTurretSpamFix");
+    Log::GetLog()->info("Loading plugin - DamageNumbers v2.6 TurretRpcOverflowFix");
 
     try {
         DamageAlerts::ReadConfig();

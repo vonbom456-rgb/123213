@@ -6,6 +6,8 @@ enemy-coloured floating numbers at the damaged target and a red text warning.
 PvPCooldowns separately handles the persistent raid timer.
 
 Version 1.7 explicitly sends the native floating-number RPC for real hits.
+Version 2.6 also applies the turret-number switches to victim-tribe clients,
+preventing reliable-RPC floods during large turret-wall soaks.
 Use `/datest` in chat to place a `12345` test number in front of the camera
 and show live hook counters.
 
