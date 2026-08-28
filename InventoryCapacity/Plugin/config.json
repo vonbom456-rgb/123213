@@ -1,0 +1,7 @@
+{
+  "PlayerInventory": {
+    "Enabled": true,
+    "MaxSlots": 1000,
+    "UpdateIntervalSeconds": 1
+  }
+}

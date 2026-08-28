@@ -9,6 +9,7 @@ on:
       - "PvPCooldowns/**"
       - "DamageAlerts/**"
       - "CryoRecovery/**"
+      - "InventoryCapacity/**"
       - ".github/workflows/build.yml"
 
 permissions:
@@ -68,10 +69,16 @@ jobs:
           msbuild "$env:GITHUB_WORKSPACE\CryoRecovery\CryoRecovery.sln" `
             /m /p:Configuration=Release /p:Platform=x64 /p:ARKAPI_ROOT="$env:ARKAPI_ROOT"
 
+      - name: Build InventoryCapacity
+        shell: pwsh
+        run: |
+          msbuild "$env:GITHUB_WORKSPACE\InventoryCapacity\InventoryCapacity.sln" `
+            /m /p:Configuration=Release /p:Platform=x64 /p:ARKAPI_ROOT="$env:ARKAPI_ROOT"
+
       - name: Collect plugin artifacts
         shell: pwsh
         run: |
-          $names = @("TurretControl", "PvPCooldowns", "CryoRecovery")
+          $names = @("TurretControl", "PvPCooldowns", "CryoRecovery", "InventoryCapacity")
           foreach ($name in $names) {
             $out = "$env:GITHUB_WORKSPACE\artifact\$name"
             New-Item -ItemType Directory -Force -Path $out | Out-Null

@@ -1,0 +1,7 @@
+{
+  "FullName": "InventoryCapacity",
+  "Description": "Raises the ASE player inventory slot limit for transfers from vanilla and S+ storage.",
+  "Version": 1.0,
+  "MinApiVersion": 3.56,
+  "Dependencies": []
+}
