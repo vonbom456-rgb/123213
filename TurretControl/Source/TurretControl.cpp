@@ -53,7 +53,7 @@ struct Config {
     // v2.4 uses measured S+ firing paths: fewer real DoFire cycles, with each
     // cycle carrying the same aggregate damage and ammunition as the grouped
     // original shots. Diagnostics remain active to verify the reduction.
-    bool shot_batching_enabled = true;
+    bool shot_batching_enabled = false;
     int shots_per_network_event = 5;
     bool rpc_diagnostics_enabled = true;
     int rpc_log_interval_seconds = 10;
@@ -1217,10 +1217,10 @@ void ApplyRpcDiagnosticsHookState() {
             &APrimalStructureTurret_ClientsFireProjectile_Implementation_original);
         if (g_rpc_diagnostics_hook_installed) {
             Log::GetLog()->info(
-            "TurretControl v2.6: read-only turret firing diagnostics enabled");
+            "TurretControl v2.7: read-only turret firing diagnostics enabled");
         } else {
             Log::GetLog()->error(
-                "TurretControl v2.6: ClientsFireProjectile diagnostics hook installation failed");
+                "TurretControl v2.7: ClientsFireProjectile diagnostics hook installation failed");
         }
     }
 
@@ -1247,11 +1247,11 @@ void ApplyRpcDiagnosticsHookState() {
             &AActor_PropertyServerToClients_original);
         if (g_property_replication_guard_hook_installed) {
             Log::GetLog()->info(
-                "TurretControl v2.6: turret PropertyServerToClients throttle enabled ({} ms)",
+                "TurretControl v2.7: turret PropertyServerToClients throttle enabled ({} ms)",
                 g_config.property_replication_min_interval_ms);
         } else {
             Log::GetLog()->error(
-                "TurretControl v2.6: AActor.PropertyServerToClients hook installation failed");
+                "TurretControl v2.7: AActor.PropertyServerToClients hook installation failed");
         }
     }
     if (!g_config.property_replication_guard_enabled &&
@@ -1266,7 +1266,7 @@ void ApplyRpcDiagnosticsHookState() {
         (!g_do_fire_diagnostics_hook_installed || !g_projectile_diagnostics_hook_installed ||
          !g_damage_diagnostics_hook_installed)) {
         Log::GetLog()->warn(
-            "TurretControl v2.6: one or more server-side firing diagnostic hooks failed (DoFire={}, Projectile={}, Damage={})",
+            "TurretControl v2.7: one or more server-side firing diagnostic hooks failed (DoFire={}, Projectile={}, Damage={})",
             g_do_fire_diagnostics_hook_installed, g_projectile_diagnostics_hook_installed,
             g_damage_diagnostics_hook_installed);
     }
@@ -1400,10 +1400,25 @@ bool ApplyShotBatching(APrimalStructureTurret* turret) {
 
     auto state_it = g_turret_batch_states.find(turret);
     if (state_it == g_turret_batch_states.end()) {
-        const TurretBatchState original{
+        // Read the unmodified values from this exact turret Blueprint's class
+        // default object.  Reading the live actor here is unsafe after an old
+        // batching build: interval/damage/ammo may already have been saved in
+        // their multiplied state (for Tek, 2 ammo * batch 5 = 10 ammo).
+        TurretBatchState original{
             turret->FireIntervalField(), turret->FireDamageAmountField(),
-            turret->NumBulletsPerShotField()
-        };
+            turret->NumBulletsPerShotField()};
+        UClass* cls = turret->ClassField();
+        UObject* cdo_object = cls ? cls->GetDefaultObject(true) : nullptr;
+        if (cdo_object && cdo_object->IsA(APrimalStructureTurret::GetPrivateStaticClass())) {
+            auto* cdo = static_cast<APrimalStructureTurret*>(cdo_object);
+            if (cdo->FireIntervalField() > 0.0f &&
+                cdo->FireDamageAmountField() > 0.0f &&
+                cdo->NumBulletsPerShotField() > 0) {
+                original = TurretBatchState{
+                    cdo->FireIntervalField(), cdo->FireDamageAmountField(),
+                    cdo->NumBulletsPerShotField()};
+            }
+        }
         state_it = g_turret_batch_states.emplace(turret, original).first;
     }
 
@@ -1476,7 +1491,7 @@ void RestoreAllBatchedTurrets() {
     }
 
     Log::GetLog()->info(
-        "TurretControl v2.6: restored {} tracked turret(s); {} could not be safely re-discovered",
+        "TurretControl v2.7: restored {} tracked turret(s); {} could not be safely re-discovered",
         restored, g_turret_batch_states.size());
 }
 
@@ -1669,7 +1684,7 @@ void HardCapTimer() {
     }
     if (batched_turrets > 0) {
         Log::GetLog()->info(
-            "TurretControl v2.6: grouped {} shots into one real firing cycle on {} turret(s)",
+            "TurretControl v2.7: grouped {} shots into one real firing cycle on {} turret(s)",
             std::clamp(g_config.shots_per_network_event, 2, 5), batched_turrets);
     }
 }
@@ -1697,7 +1712,7 @@ void RuntimeTimer() {
         ApplyInventoryHookState();
         ApplyRpcDiagnosticsHookState();
         Log::GetLog()->info(
-            "TurretControl v2.6 runtime enabled after world startup (InventoryCap={}, HardCap={}, DisableClientProjectileEffects={}, ShotBatching={}, BatchSize={}, PropertyGuard={}, PropertyIntervalMs={}, RpcDiagnostics={})",
+            "TurretControl v2.7 runtime enabled after world startup (InventoryCap={}, HardCap={}, DisableClientProjectileEffects={}, ShotBatching={}, BatchSize={}, PropertyGuard={}, PropertyIntervalMs={}, RpcDiagnostics={})",
             g_config.inventory_cap_enabled, g_config.hard_cap_enabled,
             g_config.disable_client_projectile_effects,
             g_config.shot_batching_enabled, g_config.shots_per_network_event,
@@ -2003,7 +2018,7 @@ void Load() {
     ArkApi::GetCommands().AddOnTimerCallback("TurretControl.Runtime", &RuntimeTimer);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.Reload", &ReloadCommand);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.DumpTurrets", &DumpTurretsCommand);
-    Log::GetLog()->info("Loaded plugin - TurretControl v2.6 PropertyReplicationGuard");
+    Log::GetLog()->info("Loaded plugin - TurretControl v2.7 BlueprintDefaultRestore");
 }
 
 void Unload() {

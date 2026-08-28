@@ -33,11 +33,11 @@
   "NetworkOptimization": {
     "DisableClientProjectileEffects": true,
     "ScanRadius": 12000,
-    "ShotBatchingEnabled": true,
+    "ShotBatchingEnabled": false,
     "ShotsPerNetworkEvent": 5,
     "PropertyReplicationGuardEnabled": true,
     "PropertyReplicationMinIntervalMs": 1000,
-    "RpcDiagnosticsEnabled": true,
+    "RpcDiagnosticsEnabled": false,
     "RpcLogIntervalSeconds": 10
   },
   "FillRadiusHologram": {
