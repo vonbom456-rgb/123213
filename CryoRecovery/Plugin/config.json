@@ -1,0 +1,14 @@
+{
+  "CryopodHealing": {
+    "Enabled": true,
+    "HealPercentPerMinute": 2.0,
+    "PvpHealPercentPerMinute": 1.5,
+    "MinimumStoredSeconds": 5,
+    "MaximumCountedHours": 24.0
+  },
+  "Messages": {
+    "NotifyPlayer": true,
+    "StatusCommand": "/cryoheal",
+    "Healed": "Cryopod recovery: +{0} HP ({1}% total)."
+  }
+}

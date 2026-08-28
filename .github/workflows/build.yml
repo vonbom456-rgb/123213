@@ -8,6 +8,7 @@ on:
       - "TurretControl/**"
       - "PvPCooldowns/**"
       - "DamageAlerts/**"
+      - "CryoRecovery/**"
       - ".github/workflows/build.yml"
 
 permissions:
@@ -61,10 +62,16 @@ jobs:
           msbuild "$env:GITHUB_WORKSPACE\DamageAlerts\DamageAlerts.sln" `
             /m /p:Configuration=Release /p:Platform=x64 /p:ARKAPI_ROOT="$env:ARKAPI_ROOT"
 
+      - name: Build CryoRecovery
+        shell: pwsh
+        run: |
+          msbuild "$env:GITHUB_WORKSPACE\CryoRecovery\CryoRecovery.sln" `
+            /m /p:Configuration=Release /p:Platform=x64 /p:ARKAPI_ROOT="$env:ARKAPI_ROOT"
+
       - name: Collect plugin artifacts
         shell: pwsh
         run: |
-          $names = @("TurretControl", "PvPCooldowns")
+          $names = @("TurretControl", "PvPCooldowns", "CryoRecovery")
           foreach ($name in $names) {
             $out = "$env:GITHUB_WORKSPACE\artifact\$name"
             New-Item -ItemType Directory -Force -Path $out | Out-Null
@@ -110,6 +117,6 @@ jobs:
           gh release create "plugins-${{ github.run_number }}" `
             "$env:GITHUB_WORKSPACE\AllPlugins-Release-x64.zip" `
             --title "ARK plugins build ${{ github.run_number }}" `
-            --notes "TurretControl, PvPCooldowns and DamageNumbers built for ArkApi 3.56 from commit ${{ github.sha }}."
+            --notes "TurretControl, PvPCooldowns, DamageNumbers and CryoRecovery built for ArkApi 3.56 from commit ${{ github.sha }}."
         env:
           GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,5 @@
+{
+  "FullName": "CryoRecovery",
+  "Description": "Heals stored dinos while they are in cryopods, with a slightly slower configurable rate during RAID/PvP.",
+  "Version": "1.0"
+}
