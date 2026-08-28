@@ -1,0 +1,16 @@
+{
+  "General": {
+    "Enabled": true,
+    "PreventSpawnAnimation": true
+  },
+  "Commands": {
+    "Repair": "/repair"
+  },
+  "Repair": {
+    "RadiusFoundations": 10,
+    "FoundationSizeUnits": 300.0,
+    "MaxStructuresPerCommand": 1000,
+    "CommandCooldownSeconds": 10,
+    "CostMultiplier": 1.0
+  }
+}

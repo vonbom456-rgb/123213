@@ -14,6 +14,7 @@ on:
       - "NewbornProtection/**"
       - "WorldCleanup/**"
       - "BlueprintSorter/**"
+      - "BaseMaintenance/**"
       - ".github/workflows/build.yml"
 
 permissions:
@@ -82,7 +83,7 @@ jobs:
       - name: Build gameplay utility plugins
         shell: pwsh
         run: |
-          $names = @("ResourceLogistics", "NewbornProtection", "WorldCleanup", "BlueprintSorter")
+          $names = @("ResourceLogistics", "NewbornProtection", "WorldCleanup", "BlueprintSorter", "BaseMaintenance")
           foreach ($name in $names) {
             msbuild "$env:GITHUB_WORKSPACE\$name\$name.sln" `
               /m /p:Configuration=Release /p:Platform=x64 /p:ARKAPI_ROOT="$env:ARKAPI_ROOT"
@@ -91,7 +92,7 @@ jobs:
       - name: Collect plugin artifacts
         shell: pwsh
         run: |
-          $names = @("TurretControl", "PvPCooldowns", "CryoRecovery", "InventoryCapacity", "ResourceLogistics", "NewbornProtection", "WorldCleanup", "BlueprintSorter")
+          $names = @("TurretControl", "PvPCooldowns", "CryoRecovery", "InventoryCapacity", "ResourceLogistics", "NewbornProtection", "WorldCleanup", "BlueprintSorter", "BaseMaintenance")
           foreach ($name in $names) {
             $out = "$env:GITHUB_WORKSPACE\artifact\$name"
             New-Item -ItemType Directory -Force -Path $out | Out-Null
