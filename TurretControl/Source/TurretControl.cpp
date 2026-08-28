@@ -49,11 +49,11 @@ struct Config {
     // when a large S+ turret wall fires at one target.
     bool disable_client_projectile_effects = true;
     float network_scan_radius = 12000.0f;
-    // The old field-only batching experiment is retained in the config for
-    // backwards compatibility but is forced off in v2.3. It multiplied live
-    // turret fields without proving that reliable RPC traffic was reduced.
-    bool shot_batching_enabled = false;
-    int shots_per_network_event = 3;
+    // v2.4 uses measured S+ firing paths: fewer real DoFire cycles, with each
+    // cycle carrying the same aggregate damage and ammunition as the grouped
+    // original shots. Diagnostics remain active to verify the reduction.
+    bool shot_batching_enabled = true;
+    int shots_per_network_event = 5;
     bool rpc_diagnostics_enabled = true;
     int rpc_log_interval_seconds = 10;
 
@@ -1148,10 +1148,10 @@ void ApplyRpcDiagnosticsHookState() {
             &APrimalStructureTurret_ClientsFireProjectile_Implementation_original);
         if (g_rpc_diagnostics_hook_installed) {
             Log::GetLog()->info(
-            "TurretControl v2.3: read-only turret firing diagnostics enabled");
+            "TurretControl v2.4: read-only turret firing diagnostics enabled");
         } else {
             Log::GetLog()->error(
-                "TurretControl v2.3: ClientsFireProjectile diagnostics hook installation failed");
+                "TurretControl v2.4: ClientsFireProjectile diagnostics hook installation failed");
         }
     }
 
@@ -1176,7 +1176,7 @@ void ApplyRpcDiagnosticsHookState() {
         (!g_do_fire_diagnostics_hook_installed || !g_projectile_diagnostics_hook_installed ||
          !g_damage_diagnostics_hook_installed)) {
         Log::GetLog()->warn(
-            "TurretControl v2.3: one or more server-side firing diagnostic hooks failed (DoFire={}, Projectile={}, Damage={})",
+            "TurretControl v2.4: one or more server-side firing diagnostic hooks failed (DoFire={}, Projectile={}, Damage={})",
             g_do_fire_diagnostics_hook_installed, g_projectile_diagnostics_hook_installed,
             g_damage_diagnostics_hook_installed);
     }
@@ -1305,12 +1305,40 @@ std::chrono::steady_clock::time_point g_runtime_enable_at{};
 bool g_world_ready_seen = false;
 bool g_runtime_ready = false;
 
-// v2.1 attempted to batch shots by multiplying FireInterval,
-// FireDamageAmount and NumBulletsPerShot. NumBulletsPerShot semantics are not
-// documented well enough to prove that this reduces RPCs, and the combination
-// could multiply damage twice. v2.3 deliberately performs no field batching.
-bool ApplyShotBatching(APrimalStructureTurret*) {
-    return false;
+bool ApplyShotBatching(APrimalStructureTurret* turret) {
+    if (!turret || DetectTurretKind(turret) == TurretKind::Unsupported) return false;
+
+    auto state_it = g_turret_batch_states.find(turret);
+    if (state_it == g_turret_batch_states.end()) {
+        const TurretBatchState original{
+            turret->FireIntervalField(), turret->FireDamageAmountField(),
+            turret->NumBulletsPerShotField()
+        };
+        state_it = g_turret_batch_states.emplace(turret, original).first;
+    }
+
+    const TurretBatchState& original = state_it->second;
+    const int batch = std::clamp(g_config.shots_per_network_event, 2, 5);
+    const bool compatible = turret->bUseInstantDamageShooting().Get() &&
+        original.fire_interval > 0.0f && original.fire_damage > 0.0f &&
+        original.ammo_per_shot > 0;
+    const bool enough_ammo = turret->NumBulletsField() >= original.ammo_per_shot * batch;
+    const bool enable = g_config.shot_batching_enabled && compatible && enough_ammo;
+
+    const float desired_interval = enable
+        ? original.fire_interval * static_cast<float>(batch) : original.fire_interval;
+    const float desired_damage = enable
+        ? original.fire_damage * static_cast<float>(batch) : original.fire_damage;
+    const int desired_ammo = enable
+        ? original.ammo_per_shot * batch : original.ammo_per_shot;
+
+    const bool changed = std::abs(turret->FireIntervalField() - desired_interval) > 0.0001f ||
+        std::abs(turret->FireDamageAmountField() - desired_damage) > 0.0001f ||
+        turret->NumBulletsPerShotField() != desired_ammo;
+    turret->FireIntervalField() = desired_interval;
+    turret->FireDamageAmountField() = desired_damage;
+    turret->NumBulletsPerShotField() = desired_ammo;
+    return enable && changed;
 }
 
 // Restore only pointers re-discovered through a fresh world octree scan. Raw
@@ -1358,7 +1386,7 @@ void RestoreAllBatchedTurrets() {
     }
 
     Log::GetLog()->info(
-        "TurretControl v2.3: restored {} tracked turret(s); {} could not be safely re-discovered",
+        "TurretControl v2.4: restored {} tracked turret(s); {} could not be safely re-discovered",
         restored, g_turret_batch_states.size());
 }
 
@@ -1399,7 +1427,8 @@ void LogRpcDiagnostics() {
 
 void HardCapTimer() {
     if (!g_runtime_ready ||
-        (!g_config.hard_cap_enabled && !g_config.disable_client_projectile_effects)) return;
+        (!g_config.hard_cap_enabled && !g_config.disable_client_projectile_effects &&
+         !g_config.shot_batching_enabled)) return;
 
     const auto now = std::chrono::steady_clock::now();
     if (now < g_next_hard_cap_check) return;
@@ -1418,6 +1447,7 @@ void HardCapTimer() {
     std::unordered_map<int, std::vector<RefundTarget>> refund_targets;
     std::vector<FVector> scan_origins;
     int disabled_client_effects = 0;
+    int batched_turrets = 0;
 
     // Build the owner/refund lookup before scanning any turret. Previously an
     // enemy controller could encounter the turret first, mark it checked and
@@ -1478,6 +1508,8 @@ void HardCapTimer() {
                 }
             }
 
+            if (ApplyShotBatching(turret)) ++batched_turrets;
+
             if (!g_config.hard_cap_enabled) continue;
 
             const TurretKind kind = DetectTurretKind(turret);
@@ -1533,6 +1565,11 @@ void HardCapTimer() {
             "TurretControl v2.0 network guard: disabled per-shot client projectile effects on {} turret(s)",
             disabled_client_effects);
     }
+    if (batched_turrets > 0) {
+        Log::GetLog()->info(
+            "TurretControl v2.4: grouped {} shots into one real firing cycle on {} turret(s)",
+            std::clamp(g_config.shots_per_network_event, 2, 5), batched_turrets);
+    }
 }
 
 // Do not install the global inventory hook or scan structures while ARK is
@@ -1558,9 +1595,10 @@ void RuntimeTimer() {
         ApplyInventoryHookState();
         ApplyRpcDiagnosticsHookState();
         Log::GetLog()->info(
-            "TurretControl v2.3 runtime enabled after world startup (InventoryCap={}, HardCap={}, DisableClientProjectileEffects={}, ShotBatchingForcedOff=true, RpcDiagnostics={})",
+            "TurretControl v2.4 runtime enabled after world startup (InventoryCap={}, HardCap={}, DisableClientProjectileEffects={}, ShotBatching={}, BatchSize={}, RpcDiagnostics={})",
             g_config.inventory_cap_enabled, g_config.hard_cap_enabled,
             g_config.disable_client_projectile_effects,
+            g_config.shot_batching_enabled, g_config.shots_per_network_event,
             g_config.rpc_diagnostics_enabled);
     }
 
@@ -1699,12 +1737,6 @@ void ReadConfig() {
     const minijson::Value root = minijson::parse(ss.str());
     if (!root.is_object()) throw std::runtime_error("config root must be a JSON object");
     g_config = ParseConfig(root);
-
-    if (g_config.shot_batching_enabled) {
-        Log::GetLog()->warn(
-            "TurretControl v2.3: ShotBatchingEnabled was requested but the unsafe field-only experiment is forced off");
-        g_config.shot_batching_enabled = false;
-    }
 
 #if !(defined(TURRETCONTROL_WITH_PERMISSIONS) && TURRETCONTROL_WITH_PERMISSIONS)
     if (g_config.use_permissions) {
@@ -1854,7 +1886,7 @@ void Load() {
     ArkApi::GetCommands().AddOnTimerCallback("TurretControl.Runtime", &RuntimeTimer);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.Reload", &ReloadCommand);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.DumpTurrets", &DumpTurretsCommand);
-    Log::GetLog()->info("Loaded plugin - TurretControl v2.3 FiringPathDiagnostics");
+    Log::GetLog()->info("Loaded plugin - TurretControl v2.4 MeasuredShotGrouping");
 }
 
 void Unload() {

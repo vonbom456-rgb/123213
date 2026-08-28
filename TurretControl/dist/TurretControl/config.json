@@ -22,8 +22,8 @@
   "NetworkOptimization": {
     "DisableClientProjectileEffects": true,
     "ScanRadius": 12000,
-    "ShotBatchingEnabled": false,
-    "ShotsPerNetworkEvent": 3,
+    "ShotBatchingEnabled": true,
+    "ShotsPerNetworkEvent": 5,
     "RpcDiagnosticsEnabled": true,
     "RpcLogIntervalSeconds": 10
   },
