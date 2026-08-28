@@ -22,6 +22,7 @@ struct Config {
     float pvp_heal_percent_per_minute = 1.5f;
     int minimum_stored_seconds = 5;
     float maximum_counted_hours = 24.0f;
+    float post_spawn_apply_delay_seconds = 3.0f;
     bool daeodon_enabled = true;
     float daeodon_heal_multiplier = 3.0f;
     float daeodon_pvp_heal_multiplier = 2.25f;
@@ -49,6 +50,19 @@ struct DinoKeyHash {
 
 Config g_config;
 std::unordered_map<DinoKey, std::int64_t, DinoKeyHash> g_stored_at;
+
+struct PendingRecovery {
+    TWeakObjectPtr<APrimalDinoCharacter> dino;
+    TWeakObjectPtr<AShooterPlayerController> controller;
+    DinoKey key;
+    std::int64_t elapsed_seconds = 0;
+    float rate = 0.0f;
+    float health_after_spawn = 0.0f;
+    bool pvp = false;
+    std::chrono::steady_clock::time_point apply_at{};
+};
+
+std::vector<PendingRecovery> g_pending_recoveries;
 bool g_capture_hook_installed = false;
 bool g_spawn_hook_installed = false;
 bool g_set_health_hook_installed = false;
@@ -92,6 +106,9 @@ void ReadConfig() {
         root, "CryopodHealing", "MinimumStoredSeconds", value.minimum_stored_seconds);
     value.maximum_counted_hours = minijson::number(
         root, "CryopodHealing", "MaximumCountedHours", value.maximum_counted_hours);
+    value.post_spawn_apply_delay_seconds = minijson::number(
+        root, "CryopodHealing", "PostSpawnApplyDelaySeconds",
+        value.post_spawn_apply_delay_seconds);
     value.daeodon_enabled = minijson::boolean(
         root, "DaeodonHealing", "Enabled", value.daeodon_enabled);
     value.daeodon_heal_multiplier = minijson::number(
@@ -108,6 +125,8 @@ void ReadConfig() {
     value.pvp_heal_percent_per_minute = std::max(0.0f, value.pvp_heal_percent_per_minute);
     value.minimum_stored_seconds = std::max(0, value.minimum_stored_seconds);
     value.maximum_counted_hours = std::max(0.0f, value.maximum_counted_hours);
+    value.post_spawn_apply_delay_seconds = std::clamp(
+        value.post_spawn_apply_delay_seconds, 0.5f, 10.0f);
     value.daeodon_heal_multiplier = std::max(1.0f, value.daeodon_heal_multiplier);
     value.daeodon_pvp_heal_multiplier = std::max(1.0f, value.daeodon_pvp_heal_multiplier);
     g_config = value;
@@ -232,6 +251,68 @@ void Hook_APrimalDinoCharacter_GetDinoData(
     Log::GetLog()->debug("CryoRecovery: captured dino id={}:{}", key.id1, key.id2);
 }
 
+void RecoveryTimer() {
+    if (g_pending_recoveries.empty()) return;
+
+    const auto now = std::chrono::steady_clock::now();
+    auto it = g_pending_recoveries.begin();
+    while (it != g_pending_recoveries.end()) {
+        if (now < it->apply_at) {
+            ++it;
+            continue;
+        }
+
+        APrimalDinoCharacter* dino = it->dino.Get();
+        AShooterPlayerController* controller = it->controller.Get();
+        if (!dino || !dino->BPIsTamed()) {
+            Log::GetLog()->warn(
+                "CryoRecovery: delayed recovery skipped for missing dino id={}:{}",
+                it->key.id1, it->key.id2);
+            it = g_pending_recoveries.erase(it);
+            continue;
+        }
+
+        const float max_health = dino->GetMaxHealth();
+        const float current_health = dino->GetHealth();
+        const float base_health = std::max(current_health, it->health_after_spawn);
+        const double max_seconds = static_cast<double>(g_config.maximum_counted_hours) * 3600.0;
+        const double counted_seconds = g_config.maximum_counted_hours > 0.0f
+            ? std::min<double>(it->elapsed_seconds, max_seconds)
+            : static_cast<double>(it->elapsed_seconds);
+        const double healed_percent = counted_seconds / 60.0 * static_cast<double>(it->rate);
+        const float heal_amount = static_cast<float>(max_health * healed_percent / 100.0);
+        const float new_health = std::min(max_health, base_health + heal_amount);
+        const float applied = std::max(0.0f, new_health - current_health);
+
+        if (max_health > 0.0f && applied > 0.0f) {
+            // SpawnFromDinoDataEx returns before ARK/S+ has finished recalculating
+            // the dino's status component. Applying health here prevents that
+            // post-spawn recalculation from overwriting cryopod recovery.
+            dino->SetHealth(new_health);
+            Log::GetLog()->info(
+                "CryoRecovery: delayed release heal id={}:{} stored={}s pvp={} rate={}%%/min health={} -> {} / {}",
+                it->key.id1, it->key.id2, it->elapsed_seconds, it->pvp, it->rate,
+                current_health, new_health, max_health);
+
+            if (g_config.notify_player && controller) {
+                const int total_percent = static_cast<int>(
+                    std::lround((new_health / max_health) * 100.0f));
+                std::string message = ReplaceToken(
+                    g_config.healed_message, "{0}",
+                    std::to_string(static_cast<long long>(std::llround(applied))));
+                message = ReplaceToken(message, "{1}", std::to_string(total_percent));
+                Send(controller, message);
+            }
+        } else {
+            Log::GetLog()->info(
+                "CryoRecovery: no delayed heal needed id={}:{} health={} / {}",
+                it->key.id1, it->key.id2, current_health, max_health);
+        }
+
+        it = g_pending_recoveries.erase(it);
+    }
+}
+
 APrimalDinoCharacter* Hook_APrimalDinoCharacter_SpawnFromDinoDataEx(
     FARKDinoData* in_data, UWorld* world, FVector* location, FRotator* rotation,
     bool* duped_dino, int for_team, bool generate_new_id,
@@ -255,33 +336,25 @@ APrimalDinoCharacter* Hook_APrimalDinoCharacter_SpawnFromDinoDataEx(
     const bool pvp = IsOnPvpCooldown(tamer_controller);
     const float rate = pvp ? g_config.pvp_heal_percent_per_minute
                            : g_config.heal_percent_per_minute;
-    const double max_seconds = static_cast<double>(g_config.maximum_counted_hours) * 3600.0;
-    const double counted_seconds = g_config.maximum_counted_hours > 0.0f
-        ? std::min<double>(elapsed_seconds, max_seconds)
-        : static_cast<double>(elapsed_seconds);
-
     const float old_health = dino->GetHealth();
-    const float max_health = dino->GetMaxHealth();
-    if (rate <= 0.0f || max_health <= 0.0f || old_health >= max_health) return dino;
+    if (rate <= 0.0f) return dino;
 
-    const double healed_percent = counted_seconds / 60.0 * static_cast<double>(rate);
-    const float heal_amount = static_cast<float>(max_health * healed_percent / 100.0);
-    const float new_health = std::min(max_health, old_health + heal_amount);
-    const float applied = std::max(0.0f, new_health - old_health);
-    if (applied <= 0.0f) return dino;
-
-    dino->SetHealth(new_health);
+    PendingRecovery pending;
+    pending.dino = GetWeakReference(dino);
+    pending.controller = GetWeakReference(tamer_controller);
+    pending.key = key;
+    pending.elapsed_seconds = elapsed_seconds;
+    pending.rate = rate;
+    pending.health_after_spawn = old_health;
+    pending.pvp = pvp;
+    pending.apply_at = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(static_cast<int>(
+            std::lround(g_config.post_spawn_apply_delay_seconds * 1000.0f)));
+    g_pending_recoveries.push_back(pending);
     Log::GetLog()->info(
-        "CryoRecovery: released dino id={}:{} stored={}s pvp={} rate={}%%/min health={} -> {} / {}",
-        key.id1, key.id2, elapsed_seconds, pvp, rate, old_health, new_health, max_health);
-
-    if (g_config.notify_player && tamer_controller) {
-        const int total_percent = static_cast<int>(std::lround((new_health / max_health) * 100.0f));
-        std::string message = ReplaceToken(
-            g_config.healed_message, "{0}", std::to_string(static_cast<long long>(std::llround(applied))));
-        message = ReplaceToken(message, "{1}", std::to_string(total_percent));
-        Send(tamer_controller, message);
-    }
+        "CryoRecovery: queued release heal id={}:{} stored={}s pvp={} rate={}%%/min initial_health={} delay={}s",
+        key.id1, key.id2, elapsed_seconds, pvp, rate, old_health,
+        g_config.post_spawn_apply_delay_seconds);
     return dino;
 }
 
@@ -295,7 +368,8 @@ void StatusCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type) 
             << " x" << g_config.daeodon_heal_multiplier
             << " (PvP x" << g_config.daeodon_pvp_heal_multiplier << ')'
             << " | boosts=" << g_daeodon_boosts
-            << " | tracked=" << g_stored_at.size();
+            << " | tracked=" << g_stored_at.size()
+            << " | pending=" << g_pending_recoveries.size();
     Send(pc, message.str());
 }
 
@@ -303,13 +377,15 @@ void StatusCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type) 
 
 void Load() {
     Log::Get().Init("CryoRecovery");
-    Log::GetLog()->info("Loading plugin - CryoRecovery v1.1");
+    Log::GetLog()->info("Loading plugin - CryoRecovery v1.2 PostSpawnHealthFix");
     try { CryoRecovery::ReadConfig(); }
     catch (const std::exception& error) {
         Log::GetLog()->error("CryoRecovery: config error ({}), using defaults", error.what());
         CryoRecovery::g_config = CryoRecovery::Config();
     }
     CryoRecovery::LoadState();
+    ArkApi::GetCommands().AddOnTimerCallback(
+        "CryoRecovery.DeferredHeal", &CryoRecovery::RecoveryTimer);
 
     CryoRecovery::g_capture_hook_installed = ArkApi::GetHooks().SetHook(
         "APrimalDinoCharacter.GetDinoData",
@@ -337,9 +413,10 @@ void Load() {
             &CryoRecovery::StatusCommand);
     }
     Log::GetLog()->info(
-        "CryoRecovery v1.1 ready (cryo={}%%/min, PvP cryo={}%%/min, Daeodon=x{}, PvP Daeodon=x{}, capture_hook={}, spawn_hook={}, health_hook={})",
+        "CryoRecovery v1.2 ready (cryo={}%%/min, PvP cryo={}%%/min, apply_delay={}s, Daeodon=x{}, PvP Daeodon=x{}, capture_hook={}, spawn_hook={}, health_hook={})",
         CryoRecovery::g_config.heal_percent_per_minute,
         CryoRecovery::g_config.pvp_heal_percent_per_minute,
+        CryoRecovery::g_config.post_spawn_apply_delay_seconds,
         CryoRecovery::g_config.daeodon_heal_multiplier,
         CryoRecovery::g_config.daeodon_pvp_heal_multiplier,
         CryoRecovery::g_capture_hook_installed,
@@ -349,6 +426,7 @@ void Load() {
 
 void Unload() {
     CryoRecovery::SaveState();
+    ArkApi::GetCommands().RemoveOnTimerCallback("CryoRecovery.DeferredHeal");
     if (!CryoRecovery::g_config.status_command.empty())
         ArkApi::GetCommands().RemoveChatCommand(FString(CryoRecovery::g_config.status_command.c_str()));
     if (CryoRecovery::g_capture_hook_installed)
@@ -364,6 +442,7 @@ void Unload() {
             "APrimalCharacter.SetHealth",
             &CryoRecovery::Hook_APrimalCharacter_SetHealth);
     CryoRecovery::g_stored_at.clear();
+    CryoRecovery::g_pending_recoveries.clear();
 }
 
 extern "C" __declspec(dllexport) void __fastcall Plugin_Init() noexcept {

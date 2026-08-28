@@ -4,7 +4,8 @@
     "HealPercentPerMinute": 2.0,
     "PvpHealPercentPerMinute": 1.5,
     "MinimumStoredSeconds": 5,
-    "MaximumCountedHours": 24.0
+    "MaximumCountedHours": 24.0,
+    "PostSpawnApplyDelaySeconds": 3.0
   },
   "DaeodonHealing": {
     "Enabled": true,

@@ -1,6 +1,6 @@
 {
   "FullName": "CryoRecovery",
   "Description": "Configurable cryopod recovery and boosted Daeodon healing, with slightly lower rates during RAID/PvP.",
-  "Version": 1.1,
+  "Version": 1.2,
   "MinApiVersion": 3.56
 }
