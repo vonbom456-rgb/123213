@@ -1,5 +1,7 @@
 # CryoRecovery
 
+Version 1.3 also shows stored healing time through `/cryoheal` and limits actual cryopod releases during RAID/PvP to 10 total / 5 large within 30 seconds.
+
 ArkApi 3.56 plugin for ARK: Survival Evolved.
 
 - Dinos recover 2% of maximum HP per minute while stored in a cryopod.

@@ -1,0 +1,1 @@
+{"Cleanup":{"Enabled":true,"ScanIntervalSeconds":60,"EmptyDroppedItemGraceSeconds":30,"EmptyDeathCacheGraceSeconds":60,"EmptyCorpseGraceSeconds":120,"RemoveEmptyCorpses":true,"MaxDeletesPerScan":250}}

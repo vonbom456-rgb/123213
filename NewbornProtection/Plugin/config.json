@@ -1,0 +1,9 @@
+{
+  "Protection": {
+    "Enabled": true,
+    "DurationSeconds": 300,
+    "MaximumBabyAgeWhenDetected": 0.01,
+    "ScanIntervalSeconds": 5,
+    "DisableDuringPvp": true
+  }
+}

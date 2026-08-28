@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -31,6 +32,14 @@ struct Config {
     bool notify_player = true;
     std::string status_command = "/cryoheal";
     std::string healed_message = "Cryopod recovery: +{0} HP ({1}% total).";
+    bool release_limit_enabled = true;
+    int release_window_seconds = 30;
+    int max_releases = 10;
+    int max_large_releases = 5;
+    std::vector<std::string> large_dino_tokens{
+        "giganoto", "carcha", "titanosaur", "bronto", "paracer", "rockgolem",
+        "rock elemental", "rock_elemental", "magmasaur", "stego", "mek"};
+    std::string release_blocked_message = "RAID/PvP cryo limit reached. Wait a few seconds.";
 };
 
 struct DinoKey {
@@ -66,7 +75,11 @@ std::vector<PendingRecovery> g_pending_recoveries;
 bool g_capture_hook_installed = false;
 bool g_spawn_hook_installed = false;
 bool g_set_health_hook_installed = false;
+bool g_can_use_hook_installed = false;
 std::uint64_t g_daeodon_boosts = 0;
+
+struct ReleaseEvent { std::chrono::steady_clock::time_point at; bool large = false; };
+std::unordered_map<int, std::deque<ReleaseEvent>> g_release_events;
 
 using PvpCooldownQuery = bool(__fastcall*)(AShooterPlayerController*);
 
@@ -120,6 +133,13 @@ void ReadConfig() {
     value.notify_player = minijson::boolean(root, "Messages", "NotifyPlayer", value.notify_player);
     value.status_command = minijson::str(root, "Messages", "StatusCommand", value.status_command);
     value.healed_message = minijson::str(root, "Messages", "Healed", value.healed_message);
+    value.release_limit_enabled = minijson::boolean(root, "PvpReleaseLimit", "Enabled", value.release_limit_enabled);
+    value.release_window_seconds = minijson::integer(root, "PvpReleaseLimit", "WindowSeconds", value.release_window_seconds);
+    value.max_releases = minijson::integer(root, "PvpReleaseLimit", "MaxTotalReleases", value.max_releases);
+    value.max_large_releases = minijson::integer(root, "PvpReleaseLimit", "MaxLargeReleases", value.max_large_releases);
+    const auto large_tokens = minijson::strings(root, "PvpReleaseLimit", "LargeDinoTokens");
+    if (!large_tokens.empty()) value.large_dino_tokens = large_tokens;
+    value.release_blocked_message = minijson::str(root, "Messages", "ReleaseLimitReached", value.release_blocked_message);
 
     value.heal_percent_per_minute = std::max(0.0f, value.heal_percent_per_minute);
     value.pvp_heal_percent_per_minute = std::max(0.0f, value.pvp_heal_percent_per_minute);
@@ -129,6 +149,9 @@ void ReadConfig() {
         value.post_spawn_apply_delay_seconds, 0.5f, 10.0f);
     value.daeodon_heal_multiplier = std::max(1.0f, value.daeodon_heal_multiplier);
     value.daeodon_pvp_heal_multiplier = std::max(1.0f, value.daeodon_pvp_heal_multiplier);
+    value.release_window_seconds = std::clamp(value.release_window_seconds, 5, 300);
+    value.max_releases = std::clamp(value.max_releases, 1, 100);
+    value.max_large_releases = std::clamp(value.max_large_releases, 1, value.max_releases);
     g_config = value;
 }
 
@@ -221,6 +244,72 @@ DECLARE_HOOK(APrimalDinoCharacter_SpawnFromDinoDataEx, APrimalDinoCharacter*,
              AShooterPlayerController*, bool);
 
 DECLARE_HOOK(APrimalCharacter_SetHealth, float, APrimalCharacter*, float);
+DECLARE_HOOK(UPrimalItem_CanUse, bool, UPrimalItem*, bool);
+
+void PruneReleaseEvents(int team) {
+    auto it = g_release_events.find(team);
+    if (it == g_release_events.end()) return;
+    const auto cutoff = std::chrono::steady_clock::now() - std::chrono::seconds(g_config.release_window_seconds);
+    while (!it->second.empty() && it->second.front().at < cutoff) it->second.pop_front();
+    if (it->second.empty()) g_release_events.erase(it);
+}
+
+bool HasLargeToken(const std::string& text) {
+    const std::string lower = ToLower(text);
+    for (const auto& configured : g_config.large_dino_tokens) {
+        const std::string token = ToLower(configured);
+        if (!token.empty() && lower.find(token) != std::string::npos) return true;
+    }
+    return false;
+}
+
+AShooterPlayerController* ItemController(UPrimalItem* item) {
+    if (!item) return nullptr;
+    UPrimalInventoryComponent* inventory = item->OwnerInventoryField().Get();
+    AActor* owner = inventory ? inventory->GetOwner() : nullptr;
+    if (!owner || !owner->IsA(AShooterCharacter::GetPrivateStaticClass())) return nullptr;
+    AController* controller = static_cast<AShooterCharacter*>(owner)->ControllerField();
+    return controller && controller->IsA(AShooterPlayerController::GetPrivateStaticClass())
+        ? static_cast<AShooterPlayerController*>(controller) : nullptr;
+}
+
+bool IsFilledCryopod(UPrimalItem* item) {
+    if (!item) return false;
+    FString full_name;
+    item->GetFullName(&full_name, nullptr);
+    const std::string name = ToLower(full_name.ToString());
+    return name.find("filledcryopod") != std::string::npos ||
+        (name.find("cryopod") != std::string::npos && name.find("emptycryopod") == std::string::npos &&
+         !item->CustomItemDescriptionField().IsEmpty());
+}
+
+bool PodLooksLarge(UPrimalItem* item, AShooterPlayerController* pc) {
+    FString display, full_name;
+    item->GetItemName(&display, false, false, pc);
+    item->GetFullName(&full_name, nullptr);
+    return HasLargeToken(display.ToString() + " " + item->CustomItemNameField().ToString() + " " +
+        item->CustomItemDescriptionField().ToString() + " " + full_name.ToString());
+}
+
+bool Hook_UPrimalItem_CanUse(UPrimalItem* item, bool ignore_cooldown) {
+    const bool vanilla_allowed = UPrimalItem_CanUse_original(item, ignore_cooldown);
+    if (!vanilla_allowed || !g_config.release_limit_enabled || !IsFilledCryopod(item)) return vanilla_allowed;
+    AShooterPlayerController* pc = ItemController(item);
+    if (!pc || !IsOnPvpCooldown(pc)) return vanilla_allowed;
+    const int team = ArkApi::GetApiUtils().GetTribeID(pc);
+    PruneReleaseEvents(team);
+    int total = 0, large = 0;
+    const auto it = g_release_events.find(team);
+    if (it != g_release_events.end()) {
+        total = static_cast<int>(it->second.size());
+        for (const auto& event : it->second) if (event.large) ++large;
+    }
+    if (total >= g_config.max_releases || (PodLooksLarge(item, pc) && large >= g_config.max_large_releases)) {
+        Send(pc, g_config.release_blocked_message);
+        return false;
+    }
+    return true;
+}
 
 float Hook_APrimalCharacter_SetHealth(APrimalCharacter* character, float new_health) {
     if (g_config.daeodon_enabled && character &&
@@ -320,7 +409,17 @@ APrimalDinoCharacter* Hook_APrimalDinoCharacter_SpawnFromDinoDataEx(
     APrimalDinoCharacter* dino = APrimalDinoCharacter_SpawnFromDinoDataEx_original(
         in_data, world, location, rotation, duped_dino, for_team, generate_new_id,
         tamer_controller, begin_play);
-    if (!g_config.enabled || !dino) return dino;
+    if (!dino) return dino;
+
+    if (g_config.release_limit_enabled && tamer_controller && IsOnPvpCooldown(tamer_controller)) {
+        const int team = ArkApi::GetApiUtils().GetTribeID(tamer_controller);
+        FString dino_name;
+        dino->GetFullName(&dino_name, nullptr);
+        PruneReleaseEvents(team);
+        g_release_events[team].push_back({std::chrono::steady_clock::now(), HasLargeToken(dino_name.ToString())});
+    }
+
+    if (!g_config.enabled) return dino;
 
     const DinoKey key{dino->DinoID1Field(), dino->DinoID2Field()};
     const auto it = g_stored_at.find(key);
@@ -371,6 +470,23 @@ void StatusCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type) 
             << " | tracked=" << g_stored_at.size()
             << " | pending=" << g_pending_recoveries.size();
     Send(pc, message.str());
+    const std::int64_t now = UnixNow();
+    int shown = 0;
+    for (const auto& entry : g_stored_at) {
+        if (shown >= 5) break;
+        const std::int64_t seconds = std::max<std::int64_t>(0, now - entry.second);
+        const float rate = IsOnPvpCooldown(pc) ? g_config.pvp_heal_percent_per_minute
+                                               : g_config.heal_percent_per_minute;
+        const int approx = std::clamp(static_cast<int>(std::floor(seconds / 60.0 * rate)), 0, 100);
+        std::ostringstream line;
+        line << "Dino " << entry.first.id1 << ':' << entry.first.id2
+             << " stored " << seconds / 60 << "m " << seconds % 60 << "s"
+             << " | approx recovery +" << approx << "% max HP";
+        Send(pc, line.str());
+        ++shown;
+    }
+    if (g_stored_at.size() > 5)
+        Send(pc, "Showing 5 of " + std::to_string(g_stored_at.size()) + " stored dinos.");
 }
 
 } // namespace CryoRecovery
@@ -399,6 +515,9 @@ void Load() {
         "APrimalCharacter.SetHealth",
         &CryoRecovery::Hook_APrimalCharacter_SetHealth,
         &CryoRecovery::APrimalCharacter_SetHealth_original);
+    CryoRecovery::g_can_use_hook_installed = ArkApi::GetHooks().SetHook(
+        "UPrimalItem.CanUse", &CryoRecovery::Hook_UPrimalItem_CanUse,
+        &CryoRecovery::UPrimalItem_CanUse_original);
 
     if (!CryoRecovery::g_capture_hook_installed)
         Log::GetLog()->error("CryoRecovery: GetDinoData hook installation failed");
@@ -406,6 +525,8 @@ void Load() {
         Log::GetLog()->error("CryoRecovery: SpawnFromDinoDataEx hook installation failed");
     if (!CryoRecovery::g_set_health_hook_installed)
         Log::GetLog()->error("CryoRecovery: SetHealth hook installation failed; Daeodon boost unavailable");
+    if (!CryoRecovery::g_can_use_hook_installed)
+        Log::GetLog()->error("CryoRecovery: CanUse hook failed; RAID/PvP release limit unavailable");
 
     if (!CryoRecovery::g_config.status_command.empty()) {
         ArkApi::GetCommands().AddChatCommand(
@@ -413,15 +534,18 @@ void Load() {
             &CryoRecovery::StatusCommand);
     }
     Log::GetLog()->info(
-        "CryoRecovery v1.2 ready (cryo={}%%/min, PvP cryo={}%%/min, apply_delay={}s, Daeodon=x{}, PvP Daeodon=x{}, capture_hook={}, spawn_hook={}, health_hook={})",
+        "CryoRecovery v1.3 ready (cryo={}%%/min, PvP cryo={}%%/min, apply_delay={}s, Daeodon=x{}, PvP Daeodon=x{}, release_limit={}/{}, capture_hook={}, spawn_hook={}, health_hook={}, can_use_hook={})",
         CryoRecovery::g_config.heal_percent_per_minute,
         CryoRecovery::g_config.pvp_heal_percent_per_minute,
         CryoRecovery::g_config.post_spawn_apply_delay_seconds,
         CryoRecovery::g_config.daeodon_heal_multiplier,
         CryoRecovery::g_config.daeodon_pvp_heal_multiplier,
+        CryoRecovery::g_config.max_releases,
+        CryoRecovery::g_config.max_large_releases,
         CryoRecovery::g_capture_hook_installed,
         CryoRecovery::g_spawn_hook_installed,
-        CryoRecovery::g_set_health_hook_installed);
+        CryoRecovery::g_set_health_hook_installed,
+        CryoRecovery::g_can_use_hook_installed);
 }
 
 void Unload() {
@@ -441,8 +565,12 @@ void Unload() {
         ArkApi::GetHooks().DisableHook(
             "APrimalCharacter.SetHealth",
             &CryoRecovery::Hook_APrimalCharacter_SetHealth);
+    if (CryoRecovery::g_can_use_hook_installed)
+        ArkApi::GetHooks().DisableHook(
+            "UPrimalItem.CanUse", &CryoRecovery::Hook_UPrimalItem_CanUse);
     CryoRecovery::g_stored_at.clear();
     CryoRecovery::g_pending_recoveries.clear();
+    CryoRecovery::g_release_events.clear();
 }
 
 extern "C" __declspec(dllexport) void __fastcall Plugin_Init() noexcept {

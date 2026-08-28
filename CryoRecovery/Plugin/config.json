@@ -18,9 +18,20 @@
       "pig healing"
     ]
   },
+  "PvpReleaseLimit": {
+    "Enabled": true,
+    "WindowSeconds": 30,
+    "MaxTotalReleases": 10,
+    "MaxLargeReleases": 5,
+    "LargeDinoTokens": [
+      "giganoto", "carcha", "titanosaur", "bronto", "paracer",
+      "rockgolem", "rock elemental", "rock_elemental", "magmasaur", "stego", "mek"
+    ]
+  },
   "Messages": {
     "NotifyPlayer": true,
     "StatusCommand": "/cryoheal",
-    "Healed": "Cryopod recovery: +{0} HP ({1}% total)."
+    "Healed": "Cryopod recovery: +{0} HP ({1}% total).",
+    "ReleaseLimitReached": "RAID/PvP cryo limit reached. Wait a few seconds."
   }
 }
