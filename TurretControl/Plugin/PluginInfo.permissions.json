@@ -1,7 +1,7 @@
 {
   "FullName": "TurretControl",
   "Description": "Turret controls, ammo caps, PvP placement cooldown and read-only turret RPC diagnostics for ARK: Survival Evolved",
-  "Version": 2.2,
+  "Version": 2.3,
   "MinApiVersion": 3.56,
   "Dependencies": ["Permissions"]
 }
