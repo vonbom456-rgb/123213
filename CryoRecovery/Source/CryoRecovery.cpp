@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -10,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include "../../DamageAlerts/Source/MiniJson.h"
 
 namespace CryoRecovery {
@@ -20,6 +22,11 @@ struct Config {
     float pvp_heal_percent_per_minute = 1.5f;
     int minimum_stored_seconds = 5;
     float maximum_counted_hours = 24.0f;
+    bool daeodon_enabled = true;
+    float daeodon_heal_multiplier = 3.0f;
+    float daeodon_pvp_heal_multiplier = 2.25f;
+    std::vector<std::string> daeodon_buff_name_tokens{
+        "daeodon", "daedon", "pig_healing", "pig healing"};
     bool notify_player = true;
     std::string status_command = "/cryoheal";
     std::string healed_message = "Cryopod recovery: +{0} HP ({1}% total).";
@@ -44,6 +51,8 @@ Config g_config;
 std::unordered_map<DinoKey, std::int64_t, DinoKeyHash> g_stored_at;
 bool g_capture_hook_installed = false;
 bool g_spawn_hook_installed = false;
+bool g_set_health_hook_installed = false;
+std::uint64_t g_daeodon_boosts = 0;
 
 using PvpCooldownQuery = bool(__fastcall*)(AShooterPlayerController*);
 
@@ -83,6 +92,14 @@ void ReadConfig() {
         root, "CryopodHealing", "MinimumStoredSeconds", value.minimum_stored_seconds);
     value.maximum_counted_hours = minijson::number(
         root, "CryopodHealing", "MaximumCountedHours", value.maximum_counted_hours);
+    value.daeodon_enabled = minijson::boolean(
+        root, "DaeodonHealing", "Enabled", value.daeodon_enabled);
+    value.daeodon_heal_multiplier = minijson::number(
+        root, "DaeodonHealing", "HealMultiplier", value.daeodon_heal_multiplier);
+    value.daeodon_pvp_heal_multiplier = minijson::number(
+        root, "DaeodonHealing", "PvpHealMultiplier", value.daeodon_pvp_heal_multiplier);
+    const auto daeodon_tokens = minijson::strings(root, "DaeodonHealing", "BuffNameTokens");
+    if (!daeodon_tokens.empty()) value.daeodon_buff_name_tokens = daeodon_tokens;
     value.notify_player = minijson::boolean(root, "Messages", "NotifyPlayer", value.notify_player);
     value.status_command = minijson::str(root, "Messages", "StatusCommand", value.status_command);
     value.healed_message = minijson::str(root, "Messages", "Healed", value.healed_message);
@@ -91,6 +108,8 @@ void ReadConfig() {
     value.pvp_heal_percent_per_minute = std::max(0.0f, value.pvp_heal_percent_per_minute);
     value.minimum_stored_seconds = std::max(0, value.minimum_stored_seconds);
     value.maximum_counted_hours = std::max(0.0f, value.maximum_counted_hours);
+    value.daeodon_heal_multiplier = std::max(1.0f, value.daeodon_heal_multiplier);
+    value.daeodon_pvp_heal_multiplier = std::max(1.0f, value.daeodon_pvp_heal_multiplier);
     g_config = value;
 }
 
@@ -135,6 +154,40 @@ bool IsOnPvpCooldown(AShooterPlayerController* pc) {
     return query ? query(pc) : false;
 }
 
+bool IsTeamOnPvpCooldown(int team) {
+    if (team <= 0) return false;
+    UWorld* world = ArkApi::GetApiUtils().GetWorld();
+    if (!world) return false;
+    for (TWeakObjectPtr<APlayerController> weak_pc : world->PlayerControllerListField()) {
+        auto* base_pc = weak_pc.Get();
+        if (!base_pc || !base_pc->IsA(AShooterPlayerController::GetPrivateStaticClass())) continue;
+        auto* pc = static_cast<AShooterPlayerController*>(base_pc);
+        if (ArkApi::GetApiUtils().GetTribeID(pc) == team && IsOnPvpCooldown(pc)) return true;
+    }
+    return false;
+}
+
+std::string ToLower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+bool HasDaeodonHealingBuff(APrimalCharacter* character) {
+    if (!character) return false;
+    for (APrimalBuff* buff : character->BuffsField()) {
+        if (!buff) continue;
+        FString full_name;
+        buff->GetFullName(&full_name, nullptr);
+        const std::string name = ToLower(full_name.ToString());
+        for (const std::string& configured_token : g_config.daeodon_buff_name_tokens) {
+            const std::string token = ToLower(configured_token);
+            if (!token.empty() && name.find(token) != std::string::npos) return true;
+        }
+    }
+    return false;
+}
+
 void Send(AShooterPlayerController* pc, const std::string& message) {
     if (!pc || message.empty()) return;
     const FString text(ArkApi::Tools::Utf8Decode(message).c_str());
@@ -147,6 +200,25 @@ DECLARE_HOOK(APrimalDinoCharacter_GetDinoData, void,
 DECLARE_HOOK(APrimalDinoCharacter_SpawnFromDinoDataEx, APrimalDinoCharacter*,
              FARKDinoData*, UWorld*, FVector*, FRotator*, bool*, int, bool,
              AShooterPlayerController*, bool);
+
+DECLARE_HOOK(APrimalCharacter_SetHealth, float, APrimalCharacter*, float);
+
+float Hook_APrimalCharacter_SetHealth(APrimalCharacter* character, float new_health) {
+    if (g_config.daeodon_enabled && character &&
+        character->IsA(APrimalDinoCharacter::GetPrivateStaticClass())) {
+        const float old_health = character->GetHealth();
+        if (new_health > old_health && HasDaeodonHealingBuff(character)) {
+            auto* dino = static_cast<APrimalDinoCharacter*>(character);
+            const bool pvp = IsTeamOnPvpCooldown(dino->TargetingTeamField());
+            const float multiplier = pvp ? g_config.daeodon_pvp_heal_multiplier
+                                         : g_config.daeodon_heal_multiplier;
+            const float max_health = character->GetMaxHealth();
+            new_health = std::min(max_health, old_health + (new_health - old_health) * multiplier);
+            ++g_daeodon_boosts;
+        }
+    }
+    return APrimalCharacter_SetHealth_original(character, new_health);
+}
 
 void Hook_APrimalDinoCharacter_GetDinoData(
     APrimalDinoCharacter* dino, FARKDinoData* out_data) {
@@ -219,6 +291,10 @@ void StatusCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type) 
     message << "CryoRecovery: " << (g_config.enabled ? "ON" : "OFF")
             << " | normal=" << g_config.heal_percent_per_minute << "%/min"
             << " | RAID/PvP=" << g_config.pvp_heal_percent_per_minute << "%/min"
+            << " | Daeodon=" << (g_config.daeodon_enabled ? "ON" : "OFF")
+            << " x" << g_config.daeodon_heal_multiplier
+            << " (PvP x" << g_config.daeodon_pvp_heal_multiplier << ')'
+            << " | boosts=" << g_daeodon_boosts
             << " | tracked=" << g_stored_at.size();
     Send(pc, message.str());
 }
@@ -227,7 +303,7 @@ void StatusCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type) 
 
 void Load() {
     Log::Get().Init("CryoRecovery");
-    Log::GetLog()->info("Loading plugin - CryoRecovery v1.0");
+    Log::GetLog()->info("Loading plugin - CryoRecovery v1.1");
     try { CryoRecovery::ReadConfig(); }
     catch (const std::exception& error) {
         Log::GetLog()->error("CryoRecovery: config error ({}), using defaults", error.what());
@@ -243,11 +319,17 @@ void Load() {
         "APrimalDinoCharacter.SpawnFromDinoDataEx",
         &CryoRecovery::Hook_APrimalDinoCharacter_SpawnFromDinoDataEx,
         &CryoRecovery::APrimalDinoCharacter_SpawnFromDinoDataEx_original);
+    CryoRecovery::g_set_health_hook_installed = ArkApi::GetHooks().SetHook(
+        "APrimalCharacter.SetHealth",
+        &CryoRecovery::Hook_APrimalCharacter_SetHealth,
+        &CryoRecovery::APrimalCharacter_SetHealth_original);
 
     if (!CryoRecovery::g_capture_hook_installed)
         Log::GetLog()->error("CryoRecovery: GetDinoData hook installation failed");
     if (!CryoRecovery::g_spawn_hook_installed)
         Log::GetLog()->error("CryoRecovery: SpawnFromDinoDataEx hook installation failed");
+    if (!CryoRecovery::g_set_health_hook_installed)
+        Log::GetLog()->error("CryoRecovery: SetHealth hook installation failed; Daeodon boost unavailable");
 
     if (!CryoRecovery::g_config.status_command.empty()) {
         ArkApi::GetCommands().AddChatCommand(
@@ -255,11 +337,14 @@ void Load() {
             &CryoRecovery::StatusCommand);
     }
     Log::GetLog()->info(
-        "CryoRecovery v1.0 ready (normal={}%%/min, RAID/PvP={}%%/min, capture_hook={}, spawn_hook={})",
+        "CryoRecovery v1.1 ready (cryo={}%%/min, PvP cryo={}%%/min, Daeodon=x{}, PvP Daeodon=x{}, capture_hook={}, spawn_hook={}, health_hook={})",
         CryoRecovery::g_config.heal_percent_per_minute,
         CryoRecovery::g_config.pvp_heal_percent_per_minute,
+        CryoRecovery::g_config.daeodon_heal_multiplier,
+        CryoRecovery::g_config.daeodon_pvp_heal_multiplier,
         CryoRecovery::g_capture_hook_installed,
-        CryoRecovery::g_spawn_hook_installed);
+        CryoRecovery::g_spawn_hook_installed,
+        CryoRecovery::g_set_health_hook_installed);
 }
 
 void Unload() {
@@ -274,6 +359,10 @@ void Unload() {
         ArkApi::GetHooks().DisableHook(
             "APrimalDinoCharacter.SpawnFromDinoDataEx",
             &CryoRecovery::Hook_APrimalDinoCharacter_SpawnFromDinoDataEx);
+    if (CryoRecovery::g_set_health_hook_installed)
+        ArkApi::GetHooks().DisableHook(
+            "APrimalCharacter.SetHealth",
+            &CryoRecovery::Hook_APrimalCharacter_SetHealth);
     CryoRecovery::g_stored_at.clear();
 }
 

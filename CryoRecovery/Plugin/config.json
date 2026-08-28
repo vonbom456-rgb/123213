@@ -6,6 +6,17 @@
     "MinimumStoredSeconds": 5,
     "MaximumCountedHours": 24.0
   },
+  "DaeodonHealing": {
+    "Enabled": true,
+    "HealMultiplier": 3.0,
+    "PvpHealMultiplier": 2.25,
+    "BuffNameTokens": [
+      "daeodon",
+      "daedon",
+      "pig_healing",
+      "pig healing"
+    ]
+  },
   "Messages": {
     "NotifyPlayer": true,
     "StatusCommand": "/cryoheal",
