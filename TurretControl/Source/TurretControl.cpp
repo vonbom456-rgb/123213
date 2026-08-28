@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <fstream>
+#include <functional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -56,6 +57,8 @@ struct Config {
     int shots_per_network_event = 5;
     bool rpc_diagnostics_enabled = true;
     int rpc_log_interval_seconds = 10;
+    bool property_replication_guard_enabled = true;
+    int property_replication_min_interval_ms = 1000;
 
     bool pvp_placement_cooldown_enabled = true;
     float pvp_placement_cooldown_seconds = 3.0f;
@@ -148,17 +151,41 @@ struct TurretRpcStats {
     std::uint64_t damage_total = 0;
 };
 
-struct ReliableRpcStats {
-    std::string function_name;
-    std::string object_class;
-    std::uint64_t window = 0;
-    std::uint64_t total = 0;
+struct PropertyReplicationKey {
+    AActor* recipient = nullptr;
+    AActor* actor = nullptr;
+    int name_index = 0;
+    unsigned int name_number = 0;
+
+    bool operator==(const PropertyReplicationKey& other) const {
+        return recipient == other.recipient && actor == other.actor &&
+            name_index == other.name_index && name_number == other.name_number;
+    }
+};
+
+struct PropertyReplicationKeyHash {
+    std::size_t operator()(const PropertyReplicationKey& key) const {
+        std::size_t value = std::hash<std::uintptr_t>{}(
+            reinterpret_cast<std::uintptr_t>(key.recipient));
+        value ^= std::hash<std::uintptr_t>{}(
+            reinterpret_cast<std::uintptr_t>(key.actor)) + 0x9e3779b9 + (value << 6) + (value >> 2);
+        value ^= std::hash<int>{}(key.name_index) + 0x9e3779b9 + (value << 6) + (value >> 2);
+        value ^= std::hash<unsigned int>{}(key.name_number) + 0x9e3779b9 + (value << 6) + (value >> 2);
+        return value;
+    }
 };
 
 std::unordered_map<UClass*, TurretRpcStats> g_turret_rpc_stats;
-std::unordered_map<UFunction*, ReliableRpcStats> g_reliable_rpc_stats;
+std::unordered_map<PropertyReplicationKey, std::chrono::steady_clock::time_point,
+    PropertyReplicationKeyHash> g_last_property_replication;
+std::uint64_t g_property_allowed_window = 0;
+std::uint64_t g_property_suppressed_window = 0;
+std::uint64_t g_property_allowed_total = 0;
+std::uint64_t g_property_suppressed_total = 0;
 std::unordered_set<UClass*> g_logged_turret_classes;
 std::chrono::steady_clock::time_point g_next_rpc_log = std::chrono::steady_clock::now();
+std::chrono::steady_clock::time_point g_next_property_guard_cleanup =
+    std::chrono::steady_clock::now() + std::chrono::minutes(1);
 
 
 DECLARE_HOOK(UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity,
@@ -227,13 +254,12 @@ DECLARE_HOOK(APrimalStructureTurret_DealDamage,
     TSubclassOf<UDamageType>,
     float);
 
-// Global read-only RPC census. Only functions marked both Net and
-// NetReliable are counted, and the original ProcessEvent is always called.
-DECLARE_HOOK(UObject_ProcessEvent,
+DECLARE_HOOK(AActor_PropertyServerToClients,
     void,
-    UObject*,
-    UFunction*,
-    void*);
+    AActor*,
+    AActor*,
+    FName,
+    TArray<unsigned char>*);
 
 std::string ConfigPath() {
     return ArkApi::Tools::GetCurrentDir() + "/ArkApi/Plugins/TurretControl/config.json";
@@ -283,13 +309,6 @@ std::string GetClassFullName(UClass* cls) {
 
 std::string GetClassFullName(UObject* obj) {
     return obj ? GetClassFullName(obj->ClassField()) : std::string{};
-}
-
-std::string GetObjectFullName(UObject* obj) {
-    if (!obj) return {};
-    FString name;
-    obj->GetFullName(&name, nullptr);
-    return name.ToString();
 }
 
 bool IsValidTurret(APrimalStructureTurret* turret) {
@@ -1151,22 +1170,30 @@ void Hook_APrimalStructureTurret_DealDamage(
         turret, impact, shoot_dir, damage_amount, damage_type, impulse);
 }
 
-void Hook_UObject_ProcessEvent(UObject* object, UFunction* function, void* params) {
-    if (g_config.rpc_diagnostics_enabled && function) {
-        constexpr unsigned int kNet = static_cast<unsigned int>(EFunctionFlags::FUNC_Net);
-        constexpr unsigned int kReliable = static_cast<unsigned int>(EFunctionFlags::FUNC_NetReliable);
-        const unsigned int flags = function->FunctionFlags;
-        if ((flags & kNet) != 0 && (flags & kReliable) != 0) {
-            ReliableRpcStats& stats = g_reliable_rpc_stats[function];
-            if (stats.function_name.empty()) {
-                stats.function_name = GetObjectFullName(function);
-                stats.object_class = GetClassFullName(object);
-            }
-            ++stats.window;
-            ++stats.total;
+void Hook_AActor_PropertyServerToClients(
+    AActor* recipient, AActor* actor_to_rep, FName property_name,
+    TArray<unsigned char>* replication_data)
+{
+    if (g_config.property_replication_guard_enabled && actor_to_rep &&
+        actor_to_rep->IsA(APrimalStructureTurret::GetPrivateStaticClass())) {
+        const auto now = std::chrono::steady_clock::now();
+        const PropertyReplicationKey key{
+            recipient, actor_to_rep, property_name.ComparisonIndex, property_name.Number
+        };
+        const auto it = g_last_property_replication.find(key);
+        const auto interval = std::chrono::milliseconds(
+            std::clamp(g_config.property_replication_min_interval_ms, 100, 5000));
+        if (it != g_last_property_replication.end() && now - it->second < interval) {
+            ++g_property_suppressed_window;
+            ++g_property_suppressed_total;
+            return;
         }
+        g_last_property_replication[key] = now;
+        ++g_property_allowed_window;
+        ++g_property_allowed_total;
     }
-    UObject_ProcessEvent_original(object, function, params);
+    AActor_PropertyServerToClients_original(
+        recipient, actor_to_rep, property_name, replication_data);
 }
 
 bool g_inventory_max_hook_installed = false;
@@ -1178,7 +1205,7 @@ bool g_rpc_diagnostics_hook_installed = false;
 bool g_do_fire_diagnostics_hook_installed = false;
 bool g_projectile_diagnostics_hook_installed = false;
 bool g_damage_diagnostics_hook_installed = false;
-bool g_process_event_diagnostics_hook_installed = false;
+bool g_property_replication_guard_hook_installed = false;
 
 void UninstallRpcDiagnosticsHook();
 
@@ -1190,10 +1217,10 @@ void ApplyRpcDiagnosticsHookState() {
             &APrimalStructureTurret_ClientsFireProjectile_Implementation_original);
         if (g_rpc_diagnostics_hook_installed) {
             Log::GetLog()->info(
-            "TurretControl v2.5: read-only turret firing diagnostics enabled");
+            "TurretControl v2.6: read-only turret firing diagnostics enabled");
         } else {
             Log::GetLog()->error(
-                "TurretControl v2.5: ClientsFireProjectile diagnostics hook installation failed");
+                "TurretControl v2.6: ClientsFireProjectile diagnostics hook installation failed");
         }
     }
 
@@ -1213,24 +1240,33 @@ void ApplyRpcDiagnosticsHookState() {
             "APrimalStructureTurret.DealDamage", &Hook_APrimalStructureTurret_DealDamage,
             &APrimalStructureTurret_DealDamage_original);
     }
-    if (g_config.rpc_diagnostics_enabled && !g_process_event_diagnostics_hook_installed) {
-        g_process_event_diagnostics_hook_installed = ArkApi::GetHooks().SetHook(
-            "UObject.ProcessEvent", &Hook_UObject_ProcessEvent,
-            &UObject_ProcessEvent_original);
-        if (g_process_event_diagnostics_hook_installed) {
+    if (g_config.property_replication_guard_enabled &&
+        !g_property_replication_guard_hook_installed) {
+        g_property_replication_guard_hook_installed = ArkApi::GetHooks().SetHook(
+            "AActor.PropertyServerToClients", &Hook_AActor_PropertyServerToClients,
+            &AActor_PropertyServerToClients_original);
+        if (g_property_replication_guard_hook_installed) {
             Log::GetLog()->info(
-                "TurretControl v2.5: global reliable RPC census enabled");
+                "TurretControl v2.6: turret PropertyServerToClients throttle enabled ({} ms)",
+                g_config.property_replication_min_interval_ms);
         } else {
             Log::GetLog()->error(
-                "TurretControl v2.5: UObject.ProcessEvent diagnostics hook installation failed");
+                "TurretControl v2.6: AActor.PropertyServerToClients hook installation failed");
         }
+    }
+    if (!g_config.property_replication_guard_enabled &&
+        g_property_replication_guard_hook_installed) {
+        ArkApi::GetHooks().DisableHook(
+            "AActor.PropertyServerToClients", &Hook_AActor_PropertyServerToClients);
+        g_property_replication_guard_hook_installed = false;
+        g_last_property_replication.clear();
     }
 
     if (g_config.rpc_diagnostics_enabled &&
         (!g_do_fire_diagnostics_hook_installed || !g_projectile_diagnostics_hook_installed ||
          !g_damage_diagnostics_hook_installed)) {
         Log::GetLog()->warn(
-            "TurretControl v2.5: one or more server-side firing diagnostic hooks failed (DoFire={}, Projectile={}, Damage={})",
+            "TurretControl v2.6: one or more server-side firing diagnostic hooks failed (DoFire={}, Projectile={}, Damage={})",
             g_do_fire_diagnostics_hook_installed, g_projectile_diagnostics_hook_installed,
             g_damage_diagnostics_hook_installed);
     }
@@ -1268,12 +1304,6 @@ void UninstallRpcDiagnosticsHook() {
             "APrimalStructureTurret.DealDamage", &Hook_APrimalStructureTurret_DealDamage);
         g_damage_diagnostics_hook_installed = false;
     }
-    if (g_process_event_diagnostics_hook_installed) {
-        ArkApi::GetHooks().DisableHook(
-            "UObject.ProcessEvent", &Hook_UObject_ProcessEvent);
-        g_process_event_diagnostics_hook_installed = false;
-    }
-    g_reliable_rpc_stats.clear();
 }
 
 void InstallPlacementHooks() {
@@ -1446,7 +1476,7 @@ void RestoreAllBatchedTurrets() {
     }
 
     Log::GetLog()->info(
-        "TurretControl v2.5: restored {} tracked turret(s); {} could not be safely re-discovered",
+        "TurretControl v2.6: restored {} tracked turret(s); {} could not be safely re-discovered",
         restored, g_turret_batch_states.size());
 }
 
@@ -1484,30 +1514,13 @@ void LogRpcDiagnostics() {
         stats->damage_window = 0;
     }
 
-    std::vector<ReliableRpcStats*> reliable_active;
-    reliable_active.reserve(g_reliable_rpc_stats.size());
-    for (auto& entry : g_reliable_rpc_stats) {
-        if (entry.second.window > 0) reliable_active.push_back(&entry.second);
-    }
-    std::sort(reliable_active.begin(), reliable_active.end(),
-        [](const ReliableRpcStats* a, const ReliableRpcStats* b) {
-            return a->window > b->window;
-        });
-
-    constexpr std::size_t kMaxReliableRows = 25;
     Log::GetLog()->info(
-        "TurretControl.ReliableRpcStats: window={}s activeFunctions={} showingTop={}",
-        seconds, reliable_active.size(), std::min(kMaxReliableRows, reliable_active.size()));
-    for (std::size_t index = 0;
-         index < reliable_active.size() && index < kMaxReliableRows; ++index) {
-        ReliableRpcStats* stats = reliable_active[index];
-        Log::GetLog()->info(
-            "TurretControl.ReliableRpcStats: function='{}' objectClass='{}' calls={} ({:.2f}/s) total={}",
-            stats->function_name, stats->object_class, stats->window,
-            static_cast<double>(stats->window) / static_cast<double>(seconds),
-            stats->total);
-    }
-    for (ReliableRpcStats* stats : reliable_active) stats->window = 0;
+        "TurretControl.PropertyGuardStats: window={}s allowed={} suppressed={} totals=[{},{}] keys={}",
+        seconds, g_property_allowed_window, g_property_suppressed_window,
+        g_property_allowed_total, g_property_suppressed_total,
+        g_last_property_replication.size());
+    g_property_allowed_window = 0;
+    g_property_suppressed_window = 0;
 }
 
 void HardCapTimer() {
@@ -1518,6 +1531,10 @@ void HardCapTimer() {
     const auto now = std::chrono::steady_clock::now();
     if (now < g_next_hard_cap_check) return;
     g_next_hard_cap_check = now + std::chrono::seconds(std::max(1, g_config.hard_cap_interval_seconds));
+    if (now >= g_next_property_guard_cleanup) {
+        g_last_property_replication.clear();
+        g_next_property_guard_cleanup = now + std::chrono::minutes(1);
+    }
 
     UWorld* world = ArkApi::GetApiUtils().GetWorld();
     if (!world) return;
@@ -1652,7 +1669,7 @@ void HardCapTimer() {
     }
     if (batched_turrets > 0) {
         Log::GetLog()->info(
-            "TurretControl v2.5: grouped {} shots into one real firing cycle on {} turret(s)",
+            "TurretControl v2.6: grouped {} shots into one real firing cycle on {} turret(s)",
             std::clamp(g_config.shots_per_network_event, 2, 5), batched_turrets);
     }
 }
@@ -1680,10 +1697,12 @@ void RuntimeTimer() {
         ApplyInventoryHookState();
         ApplyRpcDiagnosticsHookState();
         Log::GetLog()->info(
-            "TurretControl v2.5 runtime enabled after world startup (InventoryCap={}, HardCap={}, DisableClientProjectileEffects={}, ShotBatching={}, BatchSize={}, RpcDiagnostics={})",
+            "TurretControl v2.6 runtime enabled after world startup (InventoryCap={}, HardCap={}, DisableClientProjectileEffects={}, ShotBatching={}, BatchSize={}, PropertyGuard={}, PropertyIntervalMs={}, RpcDiagnostics={})",
             g_config.inventory_cap_enabled, g_config.hard_cap_enabled,
             g_config.disable_client_projectile_effects,
             g_config.shot_batching_enabled, g_config.shots_per_network_event,
+            g_config.property_replication_guard_enabled,
+            g_config.property_replication_min_interval_ms,
             g_config.rpc_diagnostics_enabled);
     }
 
@@ -1746,6 +1765,12 @@ Config ParseConfig(const minijson::Value& root) {
         root, "NetworkOptimization", "RpcDiagnosticsEnabled", c.rpc_diagnostics_enabled);
     c.rpc_log_interval_seconds = minijson::integer(
         root, "NetworkOptimization", "RpcLogIntervalSeconds", c.rpc_log_interval_seconds);
+    c.property_replication_guard_enabled = minijson::boolean(
+        root, "NetworkOptimization", "PropertyReplicationGuardEnabled",
+        c.property_replication_guard_enabled);
+    c.property_replication_min_interval_ms = minijson::integer(
+        root, "NetworkOptimization", "PropertyReplicationMinIntervalMs",
+        c.property_replication_min_interval_ms);
 
     c.pvp_placement_cooldown_enabled = minijson::boolean(
         root, "PvpPlacementCooldown", "Enabled", c.pvp_placement_cooldown_enabled);
@@ -1861,6 +1886,7 @@ void ReloadCommand(APlayerController* player_controller, FString*, bool) {
         const std::string old_turrets = g_registered_turrets_command;
         RestoreAllBatchedTurrets();
         g_turret_batch_states.clear();
+        g_last_property_replication.clear();
         ReadConfig();
         LoadCustomClasses();
         if (g_runtime_ready) {
@@ -1962,16 +1988,22 @@ void Load() {
     g_do_fire_diagnostics_hook_installed = false;
     g_projectile_diagnostics_hook_installed = false;
     g_damage_diagnostics_hook_installed = false;
+    g_property_replication_guard_hook_installed = false;
     g_last_pvp_defense_placement.clear();
     g_turret_batch_states.clear();
     g_turret_rpc_stats.clear();
+    g_last_property_replication.clear();
+    g_property_allowed_window = 0;
+    g_property_suppressed_window = 0;
+    g_property_allowed_total = 0;
+    g_property_suppressed_total = 0;
     g_logged_turret_classes.clear();
     g_next_rpc_log = std::chrono::steady_clock::now();
     InstallPlacementHooks();
     ArkApi::GetCommands().AddOnTimerCallback("TurretControl.Runtime", &RuntimeTimer);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.Reload", &ReloadCommand);
     ArkApi::GetCommands().AddConsoleCommand("TurretControl.DumpTurrets", &DumpTurretsCommand);
-    Log::GetLog()->info("Loaded plugin - TurretControl v2.5 ReliableRpcCensus");
+    Log::GetLog()->info("Loaded plugin - TurretControl v2.6 PropertyReplicationGuard");
 }
 
 void Unload() {
@@ -1979,6 +2011,12 @@ void Unload() {
     UnregisterChatCommands();
     UninstallPlacementHooks();
     UninstallRpcDiagnosticsHook();
+    if (g_property_replication_guard_hook_installed) {
+        ArkApi::GetHooks().DisableHook(
+            "AActor.PropertyServerToClients", &Hook_AActor_PropertyServerToClients);
+        g_property_replication_guard_hook_installed = false;
+    }
+    g_last_property_replication.clear();
     if (g_inventory_max_hook_installed) {
         ArkApi::GetHooks().DisableHook("UPrimalInventoryComponent.AllowAddInventoryItem_MaxQuantity",
             &Hook_UPrimalInventoryComponent_AllowAddInventoryItem_MaxQuantity);

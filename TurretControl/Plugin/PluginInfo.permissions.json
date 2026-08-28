@@ -1,7 +1,7 @@
 {
   "FullName": "TurretControl",
-  "Description": "Measured S+ turret grouping and global reliable RPC diagnostics for ARK: Survival Evolved",
-  "Version": 2.5,
+  "Description": "Measured S+ turret grouping and duplicate turret-property replication throttle for ARK: Survival Evolved",
+  "Version": 2.6,
   "MinApiVersion": 3.56,
   "Dependencies": ["Permissions"]
 }

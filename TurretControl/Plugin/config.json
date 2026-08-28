@@ -35,6 +35,8 @@
     "ScanRadius": 12000,
     "ShotBatchingEnabled": true,
     "ShotsPerNetworkEvent": 5,
+    "PropertyReplicationGuardEnabled": true,
+    "PropertyReplicationMinIntervalMs": 1000,
     "RpcDiagnosticsEnabled": true,
     "RpcLogIntervalSeconds": 10
   },
