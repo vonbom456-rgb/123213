@@ -55,7 +55,7 @@ struct Config {
     // original shots. Diagnostics remain active to verify the reduction.
     bool shot_batching_enabled = false;
     int shots_per_network_event = 5;
-    bool rpc_diagnostics_enabled = true;
+    bool rpc_diagnostics_enabled = false;
     int rpc_log_interval_seconds = 10;
     bool property_replication_guard_enabled = true;
     int property_replication_min_interval_ms = 1000;
