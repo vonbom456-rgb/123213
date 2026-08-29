@@ -1,7 +1,7 @@
 {
   "FullName": "InventoryCapacity",
   "Description": "Repairs stale ASE inventory-full state without granting extra slots.",
-  "Version": 1.1,
+  "Version": 1.2,
   "MinApiVersion": 3.56,
   "Dependencies": []
 }

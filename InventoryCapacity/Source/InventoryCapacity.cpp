@@ -12,7 +12,7 @@
 namespace InventoryCapacity {
 
 struct Config {
-    bool enabled = true;
+    bool enabled = false;
     int player_inventory_slots = 300;
     int update_interval_seconds = 1;
 };
@@ -56,7 +56,7 @@ void ApplyToPlayers() {
     UWorld* world = ArkApi::GetApiUtils().GetWorld();
     if (!world) return;
 
-    int changed = 0;
+    int cleared = 0;
     for (TWeakObjectPtr<APlayerController> weak_pc : world->PlayerControllerListField()) {
         APlayerController* base_pc = weak_pc.Get();
         if (!base_pc || !base_pc->IsA(AShooterPlayerController::GetPrivateStaticClass())) continue;
@@ -66,28 +66,25 @@ void ApplyToPlayers() {
         UPrimalInventoryComponent* inventory = character->MyInventoryComponentField();
         if (!inventory) continue;
 
-        // Preserve a stricter Blueprint/player limit when one exists.  Only
-        // correct impossible values left by old builds and clear ARK's cached
-        // "full" state when the inventory really has a free slot.
-        int& max_items = inventory->MaxInventoryItemsField();
-        int& absolute_max = inventory->AbsoluteMaxInventoryItemsField();
-        if (max_items <= 0 || max_items > g_config.player_inventory_slots) {
-            max_items = g_config.player_inventory_slots;
-            ++changed;
-        }
-        if (absolute_max <= 0 || absolute_max > g_config.player_inventory_slots) {
-            absolute_max = g_config.player_inventory_slots;
-            ++changed;
-        }
-        const int effective_limit = std::max(1, std::min(max_items, absolute_max));
-        if (inventory->InventoryItemsField().Num() < effective_limit)
+        // Never rewrite MaxInventoryItems/AbsoluteMaxInventoryItems. Their
+        // zero and Blueprint-defined values have class-specific semantics in
+        // ASE and changing them can falsely lock an otherwise empty player
+        // inventory. Only clear the cached full flag when the inventory has
+        // fewer than the vanilla ceiling of valid item pointers.
+        int valid_items = 0;
+        for (UPrimalItem* item : inventory->InventoryItemsField())
+            if (item) ++valid_items;
+        if (valid_items < g_config.player_inventory_slots &&
+            character->bIsAtMaxInventoryItems().Get()) {
             character->bIsAtMaxInventoryItems().Set(false);
+            ++cleared;
+        }
     }
 
-    if (changed > 0) {
+    if (cleared > 0) {
         Log::GetLog()->info(
-            "InventoryCapacity: applied {} slots to {} player inventory(s)",
-            g_config.player_inventory_slots, changed);
+            "InventoryCapacity: cleared {} stale player inventory-full flag(s)",
+            cleared);
     }
 }
 
@@ -120,9 +117,8 @@ void Load() {
     ArkApi::GetCommands().AddConsoleCommand(
         "InventoryCapacity.Reload", &InventoryCapacity::ReloadCommand);
     Log::GetLog()->info(
-        "Loaded plugin - InventoryCapacity v1.1 (enabled={}, vanilla slot ceiling={})",
-        InventoryCapacity::g_config.enabled,
-        InventoryCapacity::g_config.player_inventory_slots);
+        "Loaded plugin - InventoryCapacity v1.2 safe mode (enabled={}, no inventory limit fields are modified)",
+        InventoryCapacity::g_config.enabled);
 }
 
 void Unload() {
