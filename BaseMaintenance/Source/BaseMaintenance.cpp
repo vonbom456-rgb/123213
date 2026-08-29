@@ -75,11 +75,11 @@ void ReadConfig() {
 void ApplySpawnAnimationSetting() {
     if (!g_config.prevent_spawn_animation) return;
     AShooterGameMode* game_mode = ArkApi::GetApiUtils().GetShooterGameMode();
-    AShooterGameState* game_state = ArkApi::GetApiUtils().GetShooterGameState();
+    AShooterGameState* game_state = ArkApi::GetApiUtils().GetGameState();
     if (game_mode) game_mode->bPreventSpawnAnimationsField() = true;
     if (game_state) {
         game_state->bPreventSpawnAnimationsField() = true;
-        game_state->ForceNetUpdate();
+        game_state->ForceNetUpdate(false, true, false);
     }
 }
 
@@ -345,4 +345,3 @@ void Unload() {
     ArkApi::GetCommands().RemoveConsoleCommand("BaseMaintenance.Reload");
     ArkApi::GetHooks().DisableHook("AShooterGameMode.BeginPlay", &Hook_AShooterGameMode_BeginPlay);
 }
-
