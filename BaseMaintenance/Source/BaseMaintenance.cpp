@@ -222,9 +222,13 @@ void RepairCommand(AShooterPlayerController* pc, FString* raw, EChatSendMode::Ty
     std::istringstream input(raw->ToString());
     std::string command, argument;
     input >> command >> argument;
+    std::transform(command.begin(), command.end(), command.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     std::transform(argument.begin(), argument.end(), argument.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (argument != "all") {
+    // ArkApi builds differ on whether the callback receives the complete chat
+    // line or only the part following the registered command.
+    if (command != "all" && argument != "all") {
         Send(pc, "Usage: /repair all", FColorList::Yellow);
         return;
     }
@@ -256,50 +260,66 @@ void RepairCommand(AShooterPlayerController* pc, FString* raw, EChatSendMode::Ty
         return;
     }
 
-    std::vector<Requirement> total;
-    for (APrimalStructure* structure : structures) GetStructureRequirements(structure, pc, total);
-
-    std::vector<std::string> missing;
-    for (const Requirement& requirement : total) {
-        const int available = CountResource(inventory, requirement);
-        if (available < requirement.quantity) {
-            missing.push_back(requirement.name + " x" + std::to_string(requirement.quantity - available));
-        }
-    }
-    if (!missing.empty()) {
-        std::string message = "Not enough resources. Missing: ";
-        for (size_t i = 0; i < missing.size(); ++i) {
-            if (i > 0) message += ", ";
-            message += missing[i];
-            if (message.size() > 430) { message += "..."; break; }
-        }
-        Send(pc, message, FColorList::Red);
-        return;
-    }
-
-    for (const Requirement& requirement : total) {
-        const int removed = RemoveResource(inventory, requirement);
-        if (removed != requirement.quantity) {
-            Log::GetLog()->error("BaseMaintenance unexpected resource removal mismatch wanted={} removed={}",
-                                 requirement.quantity, removed);
-            Send(pc, "Repair cancelled because resource consumption changed unexpectedly.", FColorList::Red);
-            return;
-        }
-    }
-
     int repaired = 0;
+    int insufficient = 0;
+    std::vector<Requirement> total_missing;
     for (APrimalStructure* structure : structures) {
         if (!structure || structure->bIsDead()()) continue;
+
+        // Work one structure at a time.  The old implementation summed the
+        // entire base first and repaired nothing when even the last wall was
+        // short one resource.  This makes /repair all useful on real bases:
+        // affordable structures are repaired and the missing total for the
+        // remaining structures is reported without consuming partial costs.
+        std::vector<Requirement> requirements;
+        if (!GetStructureRequirements(structure, pc, requirements)) continue;
+
+        bool affordable = true;
+        for (const Requirement& requirement : requirements) {
+            const int available = CountResource(inventory, requirement);
+            if (available < requirement.quantity) {
+                affordable = false;
+                AddRequirement(total_missing, requirement.resource_class,
+                    requirement.quantity - available, requirement.exact, pc);
+            }
+        }
+        if (!affordable) {
+            ++insufficient;
+            continue;
+        }
+
+        bool consumed = true;
+        for (const Requirement& requirement : requirements) {
+            const int removed = RemoveResource(inventory, requirement);
+            if (removed != requirement.quantity) {
+                consumed = false;
+                Log::GetLog()->error(
+                    "BaseMaintenance removal mismatch class='{}' wanted={} removed={}",
+                    ResourceName(requirement.resource_class, pc), requirement.quantity, removed);
+                break;
+            }
+        }
+        if (!consumed) continue;
+
         structure->SetHealth(structure->GetMaxHealth());
         structure->UpdatedHealth(true);
+        structure->ForceNetUpdate(false, true, false);
         ++repaired;
     }
 
     std::string result = "Repaired " + std::to_string(repaired) + " structure(s) within " +
                          std::to_string(g_config.radius_foundations) + " foundation(s).";
+    if (insufficient > 0) {
+        result += " Not enough resources for " + std::to_string(insufficient) + ": ";
+        for (size_t i = 0; i < total_missing.size(); ++i) {
+            if (i > 0) result += ", ";
+            result += total_missing[i].name + " x" + std::to_string(total_missing[i].quantity);
+            if (result.size() > 430) { result += "..."; break; }
+        }
+    }
     if (cooling_down > 0) result += " Skipped on damage cooldown: " + std::to_string(cooling_down) + ".";
     if (unsupported > 0) result += " Unsupported structures skipped: " + std::to_string(unsupported) + ".";
-    Send(pc, result);
+    Send(pc, result, repaired > 0 ? FColorList::Green : FColorList::Yellow);
 }
 
 void Reload(APlayerController*, FString*, bool) {
@@ -329,13 +349,13 @@ void Hook_AShooterGameMode_BeginPlay(AShooterGameMode* game_mode) {
 void Load() {
     Log::Get().Init("BaseMaintenance");
     BaseMaintenance::ReadConfig();
-    ArkApi::GetHooks().SetHook("AShooterGameMode.BeginPlay", &Hook_AShooterGameMode_BeginPlay,
+    ArkApi::GetHooks().SetHook("AShooterGameMode.BeginPlay", reinterpret_cast<LPVOID>(&Hook_AShooterGameMode_BeginPlay),
                                &AShooterGameMode_BeginPlay_original);
     ArkApi::GetCommands().AddChatCommand(FString(BaseMaintenance::g_config.repair_command.c_str()),
                                          &BaseMaintenance::RepairCommand);
     ArkApi::GetCommands().AddConsoleCommand("BaseMaintenance.Reload", &BaseMaintenance::Reload);
     BaseMaintenance::ApplySpawnAnimationSetting();
-    Log::GetLog()->info("Loaded plugin - BaseMaintenance v1.0 (repair radius={} foundations, prevent spawn animation={})",
+    Log::GetLog()->info("Loaded plugin - BaseMaintenance v1.1 (repair radius={} foundations, prevent spawn animation={})",
                         BaseMaintenance::g_config.radius_foundations,
                         BaseMaintenance::g_config.prevent_spawn_animation);
 }
@@ -343,5 +363,5 @@ void Load() {
 void Unload() {
     ArkApi::GetCommands().RemoveChatCommand(FString(BaseMaintenance::g_config.repair_command.c_str()));
     ArkApi::GetCommands().RemoveConsoleCommand("BaseMaintenance.Reload");
-    ArkApi::GetHooks().DisableHook("AShooterGameMode.BeginPlay", &Hook_AShooterGameMode_BeginPlay);
+    ArkApi::GetHooks().DisableHook("AShooterGameMode.BeginPlay", reinterpret_cast<LPVOID>(&Hook_AShooterGameMode_BeginPlay));
 }

@@ -1,0 +1,9 @@
+{
+  "Magmasaur": {
+    "Enabled": true,
+    "ClassToken": "cherufe",
+    "MaxHealth": 328000,
+    "MaxDamagePerHit": 6000,
+    "EnforcementIntervalSeconds": 5
+  }
+}

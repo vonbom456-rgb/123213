@@ -15,6 +15,7 @@ on:
       - "WorldCleanup/**"
       - "BlueprintSorter/**"
       - "BaseMaintenance/**"
+      - "DinoBalance/**"
       - ".github/workflows/build.yml"
 
 permissions:
@@ -89,10 +90,18 @@ jobs:
               /m /p:Configuration=Release /p:Platform=x64 /p:ARKAPI_ROOT="$env:ARKAPI_ROOT"
           }
 
+      - name: Build DinoBalance
+        shell: pwsh
+        run: |
+          cmake -S "$env:GITHUB_WORKSPACE\DinoBalance" `
+            -B "$env:GITHUB_WORKSPACE\DinoBalance\build" `
+            -A x64 -DARKAPI_ROOT="$env:ARKAPI_ROOT"
+          cmake --build "$env:GITHUB_WORKSPACE\DinoBalance\build" --config Release
+
       - name: Collect plugin artifacts
         shell: pwsh
         run: |
-          $names = @("TurretControl", "PvPCooldowns", "CryoRecovery", "InventoryCapacity", "ResourceLogistics", "NewbornProtection", "WorldCleanup", "BlueprintSorter", "BaseMaintenance")
+          $names = @("TurretControl", "PvPCooldowns", "CryoRecovery", "InventoryCapacity", "ResourceLogistics", "NewbornProtection", "WorldCleanup", "BlueprintSorter", "BaseMaintenance", "DinoBalance")
           foreach ($name in $names) {
             $out = "$env:GITHUB_WORKSPACE\artifact\$name"
             New-Item -ItemType Directory -Force -Path $out | Out-Null
