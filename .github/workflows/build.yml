@@ -16,6 +16,9 @@ on:
       - "BlueprintSorter/**"
       - "BaseMaintenance/**"
       - "DinoBalance/**"
+      - "TribeLeaderboard/**"
+      - "TekWeaponBalance/**"
+      - "GathererRouter/**"
       - ".github/workflows/build.yml"
 
 permissions:
@@ -98,10 +101,21 @@ jobs:
             -A x64 -DARKAPI_ROOT="$env:ARKAPI_ROOT"
           cmake --build "$env:GITHUB_WORKSPACE\DinoBalance\build" --config Release
 
+      - name: Build new gameplay plugins
+        shell: pwsh
+        run: |
+          $names = @("TribeLeaderboard", "TekWeaponBalance", "GathererRouter")
+          foreach ($name in $names) {
+            cmake -S "$env:GITHUB_WORKSPACE\$name" `
+              -B "$env:GITHUB_WORKSPACE\$name\build" `
+              -A x64 -DARKAPI_ROOT="$env:ARKAPI_ROOT"
+            cmake --build "$env:GITHUB_WORKSPACE\$name\build" --config Release
+          }
+
       - name: Collect plugin artifacts
         shell: pwsh
         run: |
-          $names = @("TurretControl", "PvPCooldowns", "CryoRecovery", "InventoryCapacity", "ResourceLogistics", "NewbornProtection", "WorldCleanup", "BlueprintSorter", "BaseMaintenance", "DinoBalance")
+          $names = @("TurretControl", "PvPCooldowns", "CryoRecovery", "InventoryCapacity", "ResourceLogistics", "NewbornProtection", "WorldCleanup", "BlueprintSorter", "BaseMaintenance", "DinoBalance", "TribeLeaderboard", "TekWeaponBalance", "GathererRouter")
           foreach ($name in $names) {
             $out = "$env:GITHUB_WORKSPACE\artifact\$name"
             New-Item -ItemType Directory -Force -Path $out | Out-Null

@@ -1,0 +1,5 @@
+{
+  "TekBow": {"Enabled":true,"DamageMultiplier":1.25,"ServerCooldownReductionSeconds":0.15,"ClassTokens":["tekbow","weapontekbow"]},
+  "TekGrenadeLauncher": {"Enabled":true,"DamageMultiplier":1.35,"ServerCooldownReductionSeconds":0.25,"ClassTokens":["tekgrenadelauncher","weaptekgrenadelauncher"]},
+  "Safety":{"MaximumFinalDamage":100000.0}
+}

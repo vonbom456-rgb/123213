@@ -1,0 +1,19 @@
+{
+  "General": {
+    "Enabled": true,
+    "MinTribeTeamId": 50000,
+    "TopCount": 10,
+    "MaxAwardsFromSameVictimPerMinute": 30,
+    "StateFile": "state.tsv"
+  },
+  "Commands": {"Top": "/top", "Rank": "/rank"},
+  "Points": {
+    "ThatchMin": 1, "ThatchMax": 1,
+    "WoodMin": 1, "WoodMax": 2,
+    "StoneMin": 2, "StoneMax": 4,
+    "MetalMin": 3, "MetalMax": 6,
+    "TekMin": 5, "TekMax": 10,
+    "TurretMin": 6, "TurretMax": 12,
+    "DefaultMin": 1, "DefaultMax": 3
+  }
+}
