@@ -6,6 +6,7 @@ if(NOT DEFINED ARKAPI_ROOT)
   message(FATAL_ERROR "ARKAPI_ROOT is required")
 endif()
 add_library(DinoBalance SHARED Source/DinoBalance.cpp)
+target_compile_definitions(DinoBalance PRIVATE UNICODE _UNICODE NOMINMAX)
 target_include_directories(DinoBalance PRIVATE
   "${ARKAPI_ROOT}/version/Core/Public"
   "${ARKAPI_ROOT}/include"
