@@ -1,4 +1,5 @@
 #include <API/ARK/Ark.h>
+#include <API/UE/Math/ColorList.h>
 #include <algorithm>
 #include <chrono>
 #include <fstream>
@@ -12,7 +13,7 @@
 namespace InventoryCapacity {
 
 struct Config {
-    bool enabled = false;
+    bool enabled = true;
     int player_inventory_slots = 300;
     int update_interval_seconds = 1;
 };
@@ -47,6 +48,26 @@ void ReadConfig() {
     g_config = value;
 }
 
+bool RepairPlayer(AShooterPlayerController* pc) {
+    if (!pc) return false;
+    AShooterCharacter* character = pc->GetPlayerCharacter();
+    if (!character) return false;
+    UPrimalInventoryComponent* inventory = character->MyInventoryComponentField();
+    if (!inventory) return false;
+
+    // The character keeps a cached "inventory full" flag. S+/ASE can leave
+    // it set after a failed transfer even when the inventory component itself
+    // is no longer full. Trust the inventory's native capacity calculation,
+    // clear only that stale cache and never alter slot/weight limits.
+    if (character->bIsAtMaxInventoryItems().Get() &&
+        !inventory->IsAtMaxInventoryItems()) {
+        character->bIsAtMaxInventoryItems().Set(false);
+        character->ForceNetUpdate(false, true, false);
+        return true;
+    }
+    return false;
+}
+
 void ApplyToPlayers() {
     if (!g_config.enabled) return;
     const auto now = std::chrono::steady_clock::now();
@@ -61,24 +82,7 @@ void ApplyToPlayers() {
         APlayerController* base_pc = weak_pc.Get();
         if (!base_pc || !base_pc->IsA(AShooterPlayerController::GetPrivateStaticClass())) continue;
         auto* pc = static_cast<AShooterPlayerController*>(base_pc);
-        AShooterCharacter* character = pc->GetPlayerCharacter();
-        if (!character) continue;
-        UPrimalInventoryComponent* inventory = character->MyInventoryComponentField();
-        if (!inventory) continue;
-
-        // Never rewrite MaxInventoryItems/AbsoluteMaxInventoryItems. Their
-        // zero and Blueprint-defined values have class-specific semantics in
-        // ASE and changing them can falsely lock an otherwise empty player
-        // inventory. Only clear the cached full flag when the inventory has
-        // fewer than the vanilla ceiling of valid item pointers.
-        int valid_items = 0;
-        for (UPrimalItem* item : inventory->InventoryItemsField())
-            if (item) ++valid_items;
-        if (valid_items < g_config.player_inventory_slots &&
-            character->bIsAtMaxInventoryItems().Get()) {
-            character->bIsAtMaxInventoryItems().Set(false);
-            ++cleared;
-        }
+        if (RepairPlayer(pc)) ++cleared;
     }
 
     if (cleared > 0) {
@@ -86,6 +90,15 @@ void ApplyToPlayers() {
             "InventoryCapacity: cleared {} stale player inventory-full flag(s)",
             cleared);
     }
+}
+
+void FixCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type) {
+    const bool repaired = RepairPlayer(pc);
+    const wchar_t* message = repaired
+        ? L"Inventory state repaired. Try taking the item again."
+        : L"Inventory state is already normal. Check weight and real slot limit.";
+    ArkApi::GetApiUtils().SendServerMessage(
+        pc, repaired ? FColorList::Green : FColorList::Yellow, message);
 }
 
 void ReloadCommand(APlayerController*, FString*, bool) {
@@ -116,12 +129,15 @@ void Load() {
         "InventoryCapacity.Update", &InventoryCapacity::ApplyToPlayers);
     ArkApi::GetCommands().AddConsoleCommand(
         "InventoryCapacity.Reload", &InventoryCapacity::ReloadCommand);
+    ArkApi::GetCommands().AddChatCommand(
+        "/invfix", &InventoryCapacity::FixCommand);
     Log::GetLog()->info(
-        "Loaded plugin - InventoryCapacity v1.2 safe mode (enabled={}, no inventory limit fields are modified)",
+        "Loaded plugin - InventoryCapacity v1.3 safe mode (enabled={}, no inventory limit fields are modified)",
         InventoryCapacity::g_config.enabled);
 }
 
 void Unload() {
+    ArkApi::GetCommands().RemoveChatCommand("/invfix");
     ArkApi::GetCommands().RemoveConsoleCommand("InventoryCapacity.Reload");
     ArkApi::GetCommands().RemoveOnTimerCallback("InventoryCapacity.Update");
 }

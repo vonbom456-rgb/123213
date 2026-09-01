@@ -1,6 +1,6 @@
 {
   "PlayerInventory": {
-    "Enabled": false,
+    "Enabled": true,
     "MaxSlots": 300,
     "UpdateIntervalSeconds": 1
   }
