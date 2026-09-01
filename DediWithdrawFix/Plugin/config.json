@@ -1,0 +1,8 @@
+{
+  "General": {
+    "Enabled": true,
+    "Command": "/dediwithdraw",
+    "MaxPerRequest": 10000,
+    "CooldownSeconds": 1
+  }
+}

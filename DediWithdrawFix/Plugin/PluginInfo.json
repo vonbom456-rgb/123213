@@ -1,0 +1,7 @@
+{
+  "FullName": "DediWithdrawFix",
+  "Description": "Safe command-only withdrawal workaround for S+ Dedicated Storage.",
+  "Version": 1.0,
+  "MinApiVersion": 3.56,
+  "Dependencies": []
+}

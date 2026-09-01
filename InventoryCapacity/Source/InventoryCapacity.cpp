@@ -13,7 +13,7 @@
 namespace InventoryCapacity {
 
 struct Config {
-    bool enabled = true;
+    bool enabled = false;
     int player_inventory_slots = 300;
     int update_interval_seconds = 1;
 };

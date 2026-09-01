@@ -19,6 +19,7 @@ on:
       - "TribeLeaderboard/**"
       - "TekWeaponBalance/**"
       - "GathererRouter/**"
+      - "DediWithdrawFix/**"
       - ".github/workflows/build.yml"
 
 permissions:
@@ -104,7 +105,7 @@ jobs:
       - name: Build new gameplay plugins
         shell: pwsh
         run: |
-          $names = @("TribeLeaderboard", "TekWeaponBalance", "GathererRouter")
+          $names = @("TribeLeaderboard", "TekWeaponBalance", "GathererRouter", "DediWithdrawFix")
           foreach ($name in $names) {
             cmake -S "$env:GITHUB_WORKSPACE\$name" `
               -B "$env:GITHUB_WORKSPACE\$name\build" `
@@ -115,7 +116,7 @@ jobs:
       - name: Collect plugin artifacts
         shell: pwsh
         run: |
-          $names = @("TurretControl", "PvPCooldowns", "CryoRecovery", "InventoryCapacity", "ResourceLogistics", "NewbornProtection", "WorldCleanup", "BlueprintSorter", "BaseMaintenance", "DinoBalance", "TribeLeaderboard", "TekWeaponBalance", "GathererRouter")
+          $names = @("TurretControl", "PvPCooldowns", "CryoRecovery", "InventoryCapacity", "ResourceLogistics", "NewbornProtection", "WorldCleanup", "BlueprintSorter", "BaseMaintenance", "DinoBalance", "TribeLeaderboard", "TekWeaponBalance", "GathererRouter", "DediWithdrawFix")
           foreach ($name in $names) {
             $out = "$env:GITHUB_WORKSPACE\artifact\$name"
             New-Item -ItemType Directory -Force -Path $out | Out-Null
