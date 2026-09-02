@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.15)
+project(StorageAccountingTests LANGUAGES CXX)
+add_executable(StorageAccountingTests CheckedTransferTests.cpp)
+target_compile_features(StorageAccountingTests PRIVATE cxx_std_17)
+enable_testing()
+add_test(NAME StorageAccounting COMMAND StorageAccountingTests)

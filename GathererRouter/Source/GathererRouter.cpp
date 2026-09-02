@@ -1,47 +1,203 @@
-#include <API/ARK/Ark.h>
+#include "../../ResourceLogistics/Source/StorageSafety.h"
 #include <API/UE/Math/ColorList.h>
-#include <Windows.h>
-#include <algorithm>
-#include <cctype>
+#include "../../DamageAlerts/Source/MiniJson.h"
 #include <fstream>
 #include <sstream>
-#include <stdexcept>
-#include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
-#include "../../DamageAlerts/Source/MiniJson.h"
-#pragma comment(lib,"ArkApi.lib")
+#include <chrono>
+#include <Windows.h>
+
 namespace GathererRouter {
-struct Config{bool enabled=true;float radius=6000;int interval=10,max_cycle=100000;std::string state="routes.tsv",command="/router";std::vector<std::string>sources{"resourcegatherer","gatherer_","structure_gatherer"},dedicated{"dedicatedstorage","dedicated_storage"};}g;
-struct Route{unsigned int hub=0;bool auto_sources=true;std::unordered_set<unsigned int>sources;std::unordered_map<std::string,unsigned int>targets;};
-std::unordered_map<int,Route> routes;int tick=0;
-std::string Dir(){return ArkApi::Tools::GetCurrentDir()+"/ArkApi/Plugins/GathererRouter";}
-std::string Lower(std::string s){std::transform(s.begin(),s.end(),s.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});return s;}
-std::string Full(UObject*o){if(!o)return{};FString s;o->GetFullName(&s,nullptr);return Lower(s.ToString());}
-void Send(AShooterPlayerController*p,const std::string&s,const FLinearColor&c=FColorList::Green){if(p){FString f(ArkApi::Tools::Utf8Decode(s).c_str());ArkApi::GetApiUtils().SendServerMessage(p,c,*f);}}
-void ReadConfig(){std::ifstream f(Dir()+"/config.json",std::ios::binary);if(!f)throw std::runtime_error("config missing");std::ostringstream ss;ss<<f.rdbuf();auto r=minijson::parse(ss.str());Config c;c.enabled=minijson::boolean(r,"General","Enabled",c.enabled);c.radius=std::clamp(minijson::number(r,"General","Radius",c.radius),500.0f,20000.0f);c.interval=std::clamp(minijson::integer(r,"General","IntervalSeconds",c.interval),2,60);c.max_cycle=std::clamp(minijson::integer(r,"General","MaxItemsPerCycle",c.max_cycle),1,1000000);c.state=minijson::str(r,"General","StateFile",c.state);c.command=minijson::str(r,"Commands","Root",c.command);auto a=minijson::strings(r,"Detection","SourceClassTokens");if(!a.empty())c.sources=a;a=minijson::strings(r,"Detection","DedicatedClassTokens");if(!a.empty())c.dedicated=a;for(auto&s:c.sources)s=Lower(s);for(auto&s:c.dedicated)s=Lower(s);g=c;}
-void Save(){std::ofstream f(Dir()+"/"+g.state,std::ios::trunc);for(auto&p:routes){f<<p.first<<'\t'<<p.second.hub<<'\t'<<(p.second.auto_sources?1:0)<<'\t';bool first=true;for(auto id:p.second.sources){if(!first)f<<',';f<<id;first=false;}f<<'\t';first=true;for(auto&t:p.second.targets){if(!first)f<<';';f<<t.first<<'='<<t.second;first=false;}f<<'\n';}}
-void LoadState(){routes.clear();std::ifstream f(Dir()+"/"+g.state);std::string line;while(std::getline(f,line)){std::vector<std::string>x;std::string z;std::istringstream ls(line);while(std::getline(ls,z,'\t'))x.push_back(z);if(x.size()<3)continue;int team=std::stoi(x[0]);Route r;r.hub=static_cast<unsigned int>(std::stoul(x[1]));r.auto_sources=std::stoi(x[2])!=0;if(x.size()>3){std::istringstream q(x[3]);while(std::getline(q,z,','))if(!z.empty())r.sources.insert(static_cast<unsigned int>(std::stoul(z)));}if(x.size()>4){std::istringstream q(x[4]);while(std::getline(q,z,';')){auto n=z.find('=');if(n!=std::string::npos)r.targets[Lower(z.substr(0,n))]=static_cast<unsigned int>(std::stoul(z.substr(n+1)));}}routes[team]=std::move(r);}}
-bool HasToken(const std::string&s,const std::vector<std::string>&v){for(auto&t:v)if(!t.empty()&&s.find(t)!=std::string::npos)return true;return false;}
-bool IsResource(UPrimalItem*i){return i&&!i->bIsBlueprint()()&&!i->bIsEngram()()&&i->bAllowRemovalFromInventory()()&&i->MyItemTypeField().GetValue()==EPrimalItemType::Resource&&i->GetItemQuantity()>0;}
-int Qty(UPrimalInventoryComponent*i,UClass*c){return i&&c?i->GetItemTemplateQuantity(TSubclassOf<UPrimalItem>(c),nullptr,true,false,true,true):0;}
-int Remove(UPrimalInventoryComponent*inv,UClass*cls,int wanted){if(!inv||!cls||wanted<=0)return 0;int before=Qty(inv,cls),left=std::min(wanted,before);const auto items=inv->InventoryItemsField();for(auto*i:items){if(left<=0)break;if(!IsResource(i)||i->ClassField()!=cls)continue;int q=i->GetItemQuantity(),take=std::min(q,left);if(take<q){i->SetQuantity(q-take,true);inv->NotifyClientsItemStatus(i,false,false,true,false,false,nullptr,nullptr,false,false,true);left-=take;}else if(inv->RemoveItem(&i->ItemIDField(),false,false,true,true))left-=take;}return std::clamp(before-Qty(inv,cls),0,wanted);}
-int Add(UPrimalInventoryComponent*inv,UClass*cls,int wanted){if(!inv||!cls||wanted<=0)return 0;int before=Qty(inv,cls);TSubclassOf<UPrimalItem> skin;skin.uClass=nullptr;UPrimalItem::AddNewItem(TSubclassOf<UPrimalItem>(cls),inv,false,false,0,true,wanted,false,0,false,skin,0,false,false);return std::clamp(Qty(inv,cls)-before,0,wanted);}
-int Transfer(UPrimalInventoryComponent*from,UPrimalInventoryComponent*to,UClass*cls,int wanted){int removed=Remove(from,cls,wanted);if(!removed)return 0;int added=Add(to,cls,removed);if(added<removed){int restored=Add(from,cls,removed-added);if(restored!=removed-added)Log::GetLog()->error("GathererRouter rollback failed class={} missing={}",Full(cls),removed-added-restored);}return added;}
-APrimalStructureItemContainer* Container(unsigned int id,int team){UWorld*w=ArkApi::GetApiUtils().GetWorld();auto*s=w?APrimalStructure::GetFromID(w,id):nullptr;if(!s||!s->IsA(APrimalStructureItemContainer::GetPrivateStaticClass())||s->TargetingTeamField()!=team)return nullptr;return static_cast<APrimalStructureItemContainer*>(s);}
-APrimalStructureItemContainer* AsContainer(AActor*a,AShooterPlayerController*pc){if(!a||!pc)return nullptr;if(!a->IsA(APrimalStructureItemContainer::GetPrivateStaticClass())){AActor*owner=a->OwnerField();if(!owner||!owner->IsA(APrimalStructureItemContainer::GetPrivateStaticClass()))return nullptr;a=owner;}auto*c=static_cast<APrimalStructureItemContainer*>(a);return c->TargetingTeamField()==ArkApi::GetApiUtils().GetTribeID(pc)?c:nullptr;}
-APrimalStructureItemContainer* Aimed(AShooterPlayerController*pc){if(!pc)return nullptr;int body=0;UActorComponent*component=nullptr;AActor*a=pc->GetAimedUseActor(&component,&body,true);if(auto*c=AsContainer(a,pc))return c;if(component)if(auto*c=AsContainer(component->GetOwner(),pc))return c;if(auto*c=AsContainer(pc->LastHeldUseActorField().Get(),pc))return c;AShooterCharacter*character=pc->GetPlayerCharacter();if(character){FHitResult hit{};component=nullptr;a=character->GetAimedActor(ECollisionChannel::ECC_Visibility,&component,1000.0f,20.0f,&body,&hit,true,true,true);if(auto*c=AsContainer(a,pc))return c;if(auto*c=AsContainer(hit.GetActor(),pc))return c;if(component)if(auto*c=AsContainer(component->GetOwner(),pc))return c;}for(TWeakObjectPtr<UPrimalInventoryComponent>weak:pc->RemoteViewingInventoriesField()){auto*inv=weak.Get();if(inv)if(auto*c=AsContainer(inv->GetOwner(),pc))return c;}return nullptr;}
-std::vector<APrimalStructureItemContainer*> Nearby(APrimalStructureItemContainer*hub,int team){std::vector<APrimalStructureItemContainer*>out;UWorld*w=ArkApi::GetApiUtils().GetWorld();if(!w||!hub||!hub->RootComponentField())return out;TArray<AActor*>a;UVictoryCore::ServerOctreeOverlapActorsClass(&a,w,hub->RootComponentField()->RelativeLocationField(),g.radius,EServerOctreeGroup::STRUCTURES,TSubclassOf<AActor>(APrimalStructureItemContainer::GetPrivateStaticClass()),true);for(auto*x:a)if(x&&x->IsA(APrimalStructureItemContainer::GetPrivateStaticClass())){auto*c=static_cast<APrimalStructureItemContainer*>(x);if(c->TargetingTeamField()==team&&c->MyInventoryComponentField())out.push_back(c);}return out;}
-std::string ItemText(UPrimalItem*i){return Lower(Full(i?i->ClassField():nullptr));}
-bool AcceptsClass(UPrimalInventoryComponent*inv,UClass*cls){if(!inv||!cls)return false;for(auto allowed:inv->RemoteAddItemOnlyAllowItemClassesField())if(allowed.uClass==cls)return true;for(auto used:inv->LastUsedItemClassesField())if(used.uClass==cls)return true;return false;}
-APrimalStructureItemContainer* TargetFor(UPrimalItem*i,int team,Route&r,const std::vector<APrimalStructureItemContainer*>&nearby){const auto text=ItemText(i);for(auto&m:r.targets)if(text.find(m.first)!=std::string::npos)if(auto*t=Container(m.second,team))return t;for(auto*c:nearby)if(HasToken(Full(c),g.dedicated)){auto*inv=c->MyInventoryComponentField();if(Qty(inv,i->ClassField())>0||AcceptsClass(inv,i->ClassField()))return c;}return nullptr;}
-void ProcessTeam(int team,Route&r){auto*hub=Container(r.hub,team);if(!hub)return;auto nearby=Nearby(hub,team);std::vector<APrimalStructureItemContainer*>src;for(auto id:r.sources)if(auto*s=Container(id,team))src.push_back(s);if(r.auto_sources)for(auto*c:nearby)if(c!=hub&&HasToken(Full(c),g.sources)&&std::find(src.begin(),src.end(),c)==src.end())src.push_back(c);int moved=0;for(auto*s:src){const auto items=s->MyInventoryComponentField()->InventoryItemsField();for(auto*i:items){if(moved>=g.max_cycle)break;if(IsResource(i))moved+=Transfer(s->MyInventoryComponentField(),hub->MyInventoryComponentField(),i->ClassField(),std::min(i->GetItemQuantity(),g.max_cycle-moved));}}const auto hubitems=hub->MyInventoryComponentField()->InventoryItemsField();for(auto*i:hubitems){if(moved>=g.max_cycle*2)break;if(!IsResource(i))continue;auto*t=TargetFor(i,team,r,nearby);if(t&&t!=hub)moved+=Transfer(hub->MyInventoryComponentField(),t->MyInventoryComponentField(),i->ClassField(),std::min(i->GetItemQuantity(),g.max_cycle*2-moved));}}
-void Timer(){if(!g.enabled||++tick<g.interval)return;tick=0;for(auto&p:routes)ProcessTeam(p.first,p.second);}
-void Command(AShooterPlayerController*pc,FString*raw,EChatSendMode::Type){if(!pc||!raw)return;int team=ArkApi::GetApiUtils().GetTribeID(pc);if(team<50000){Send(pc,"You must be in a tribe.",FColorList::Red);return;}std::istringstream ss(raw->ToString());std::string cmd,action,arg;ss>>cmd>>action>>arg;action=Lower(action);arg=Lower(arg);auto&r=routes[team];if(action=="hub"){auto*c=Aimed(pc);if(!c){Send(pc,"Look at a tribe storage.",FColorList::Red);return;}r.hub=c->StructureIDField();Save();Send(pc,"Router hub assigned.");}else if(action=="source"){auto*c=Aimed(pc);if(!c){Send(pc,"Look at a tribe Resource Gatherer.",FColorList::Red);return;}r.sources.insert(c->StructureIDField());Save();Send(pc,"Source added.");}else if(action=="target"){if(arg.empty()||arg=="auto"){Send(pc,"Automatic matching is always enabled: a Dedicated Storage must already contain that resource.");return;}auto*c=Aimed(pc);if(!c){Send(pc,"Look at a tribe Dedicated Storage.",FColorList::Red);return;}r.targets[arg]=c->StructureIDField();Save();Send(pc,"Target for '"+arg+"' assigned.");}else if(action=="auto"){r.auto_sources=!r.auto_sources;Save();Send(pc,std::string("Automatic gatherer discovery: ")+(r.auto_sources?"ON":"OFF"));}else if(action=="clear"){routes.erase(team);Save();Send(pc,"Router settings cleared.");}else if(action=="status"){Send(pc,"Router: hub="+std::to_string(r.hub)+", auto="+(r.auto_sources?"ON":"OFF")+", sources="+std::to_string(r.sources.size())+", manual targets="+std::to_string(r.targets.size()));}else Send(pc,"/router hub | source | target <resource> | auto | status | clear",FColorList::Yellow);}
-void Reload(APlayerController*,FString*,bool){try{ReadConfig();LoadState();Log::GetLog()->info("GathererRouter reloaded");}catch(const std::exception&e){Log::GetLog()->error("reload: {}",e.what());}}
+namespace S = StorageSafety;
+struct Config {
+    bool enabled = true;
+    float radius = 6000;
+    int interval = 10, max_cycle = 10000;
+    std::string state = "routes.tsv", command = "/router";
+    std::vector<std::string> sources{"resourcegatherer", "gatherer_", "structure_gatherer"};
+} g;
+struct Route {
+    unsigned int hub = 0;
+    bool auto_sources = true, running = false;
+    std::unordered_set<unsigned int> sources;
+    std::unordered_map<std::string, unsigned int> targets;
+};
+std::unordered_map<int, Route> routes;
+std::unordered_map<int, std::chrono::steady_clock::time_point> cooldowns;
+int tick = 0;
+bool faulted = false;
+std::string registered_command;
+std::string Dir() { return ArkApi::Tools::GetCurrentDir() + "/ArkApi/Plugins/GathererRouter"; }
+void Send(AShooterPlayerController* pc, const std::string& text) {
+    if (pc) { FString s(ArkApi::Tools::Utf8Decode(text).c_str()); ArkApi::GetApiUtils().SendServerMessage(pc, FColorList::Yellow, *s); }
 }
-void Load(){Log::Get().Init("GathererRouter");GathererRouter::ReadConfig();GathererRouter::LoadState();ArkApi::GetCommands().AddChatCommand(FString(GathererRouter::g.command.c_str()),&GathererRouter::Command);ArkApi::GetCommands().AddOnTimerCallback("GathererRouter.Tick",&GathererRouter::Timer);ArkApi::GetCommands().AddConsoleCommand("GathererRouter.Reload",&GathererRouter::Reload);Log::GetLog()->info("Loaded GathererRouter v1.0");}
-void Unload(){GathererRouter::Save();ArkApi::GetCommands().RemoveChatCommand(FString(GathererRouter::g.command.c_str()));ArkApi::GetCommands().RemoveOnTimerCallback("GathererRouter.Tick");ArkApi::GetCommands().RemoveConsoleCommand("GathererRouter.Reload");}
-extern "C" __declspec(dllexport) void __fastcall Plugin_Init() noexcept{try{Load();}catch(...){}}
-extern "C" __declspec(dllexport) void __fastcall Plugin_Unload() noexcept{try{Unload();}catch(...){}}
+void ReadConfig() {
+    std::ifstream f(Dir() + "/config.json"); if (!f) throw std::runtime_error("config missing");
+    std::ostringstream ss; ss << f.rdbuf(); auto root = minijson::parse(ss.str()); Config c;
+    c.enabled = minijson::boolean(root, "General", "Enabled", true);
+    c.radius = std::clamp(minijson::number(root, "General", "Radius", c.radius), 500.0f, 10000.0f);
+    c.interval = std::clamp(minijson::integer(root, "General", "IntervalSeconds", 10), 5, 60);
+    c.max_cycle = std::clamp(minijson::integer(root, "General", "MaxItemsPerCycle", 10000), 1, 10000);
+    c.state = minijson::str(root, "General", "StateFile", c.state);
+    if (c.state.find_first_of("/\\:") != std::string::npos || c.state.find("..") != std::string::npos) throw std::runtime_error("StateFile must be a filename");
+    c.command = minijson::str(root, "Commands", "Root", c.command);
+    auto a = minijson::strings(root, "Detection", "SourceClassTokens"); if (!a.empty()) c.sources = a;
+    for (auto& s : c.sources) s = S::Lower(s);
+    if (!registered_command.empty()) c.command = registered_command;
+    g = c;
+}
+void Save() {
+    const auto path = Dir() + "/" + g.state;
+    std::ofstream f(path + ".tmp", std::ios::trunc); if (!f) throw std::runtime_error("cannot write routes");
+    for (const auto& p : routes) {
+        f << p.first << '\t' << p.second.hub << '\t' << p.second.auto_sources << '\t';
+        for (auto id : p.second.sources) f << id << ',';
+        f << '\t'; for (const auto& t : p.second.targets) f << t.first << '=' << t.second << ';';
+        f << '\n';
+    }
+    f.flush(); if (!f) throw std::runtime_error("routes write failed"); f.close();
+    if (!MoveFileExA((path+".tmp").c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
+        throw std::runtime_error("cannot commit routes; original file preserved");
+}
+void LoadState() {
+    std::ifstream f(Dir() + "/" + g.state); routes.clear(); std::string line; int lineno = 0;
+    while (std::getline(f, line)) {
+        ++lineno;
+        try {
+            std::istringstream in(line); std::vector<std::string> x; std::string z;
+            while (std::getline(in, z, '\t')) x.push_back(z);
+            if (x.size() < 3) throw std::runtime_error("missing fields");
+            int tribe = std::stoi(x[0]); if (tribe < 50000) continue;
+            Route r; r.hub = static_cast<unsigned int>(std::stoul(x[1])); r.auto_sources = std::stoi(x[2]) != 0;
+            if (x.size() > 3) { std::istringstream a(x[3]); while (std::getline(a, z, ',')) if (!z.empty()) r.sources.insert(static_cast<unsigned int>(std::stoul(z))); }
+            if (x.size() > 4) { std::istringstream a(x[4]); while (std::getline(a, z, ';')) {
+                auto n = z.find('='); if (n != std::string::npos && n>0) r.targets[S::Lower(z.substr(0,n))] = static_cast<unsigned int>(std::stoul(z.substr(n+1)));
+            } }
+            routes[tribe] = r; // Always paused on load. Never replay old routes automatically.
+            if (routes.size() >= 256) break;
+        } catch (const std::exception& e) { Log::GetLog()->warn("Ignored invalid routes line {}: {}", lineno, e.what()); }
+    }
+}
+bool Source(APrimalStructureItemContainer* c) {
+    if (!c || S::Dedicated(c)) return false;
+    auto name = S::Name(c->ClassField());
+    for (const auto& s : g.sources) if (!s.empty() && name.find(s) != std::string::npos) return true;
+    return false;
+}
+APrimalStructureItemContainer* Select(AShooterPlayerController* pc, int tribe, const std::string& action) {
+    // No GetAimedUseActor / overloaded GetAimedActor / client camera / stale held actor.
+    auto* player = pc->GetPlayerCharacter(); APrimalStructureItemContainer* chosen = nullptr;
+    for (auto* c : S::Nearby(player, tribe, 300)) {
+        if (action == "hub" && S::Dedicated(c)) continue;
+        if (action == "source" && !Source(c)) continue;
+        if (chosen && S::Distance(player,c) - S::Distance(player,chosen) < 50) {
+            Send(pc, "Two storages are equally close. Move closer to the intended one."); return nullptr;
+        }
+        if (!chosen) chosen = c; else break;
+    }
+    if (!chosen) Send(pc, "Stand within 3m of your tribe storage (hub: normal box; source: Gatherer).");
+    return chosen;
+}
+APrimalStructureItemContainer* Target(UClass* cls, Route& r, const std::vector<APrimalStructureItemContainer*>& nearby) {
+    const auto text = S::Name(cls); unsigned int id = 0; size_t length = 0;
+    for (const auto& t : r.targets) if (text.find(t.first) != std::string::npos && t.first.size() > length) { id=t.second; length=t.first.size(); }
+    if (id) {
+        for (auto* c : nearby) if (c->StructureIDField() == id && S::Accepts(c->MyInventoryComponentField(), cls)) return c;
+        return nullptr;
+    }
+    for (auto* c : nearby) if (S::Dedicated(c) && S::Accepts(c->MyInventoryComponentField(), cls)) return c;
+    return nullptr;
+}
+int Process(int tribe, Route& r) {
+    auto* hub = S::Resolve(r.hub, tribe);
+    if (!hub || S::Dedicated(hub)) { r.running=false; return 0; }
+    auto nearby = S::Nearby(hub, tribe, g.radius); int moved=0, ops=0;
+    for (auto* c : nearby) {
+        if (c==hub || S::Dedicated(c) || !(r.sources.count(c->StructureIDField()) || (r.auto_sources && Source(c)))) continue;
+        for (auto* cls : S::Resources(c->MyInventoryComponentField())) {
+            if (moved>=g.max_cycle/2 || ++ops>32) break;
+            moved += S::Transfer(c->MyInventoryComponentField(), hub->MyInventoryComponentField(), cls, std::max(1,g.max_cycle/2)-moved);
+        }
+        if (ops>32 || moved>=g.max_cycle/2) break;
+    }
+    for (auto* cls : S::Resources(hub->MyInventoryComponentField())) {
+        if (moved>=g.max_cycle || ++ops>64) break;
+        auto* t = Target(cls,r,nearby);
+        if (t && t!=hub && !r.sources.count(t->StructureIDField()) && !Source(t))
+            moved += S::Transfer(hub->MyInventoryComponentField(),t->MyInventoryComponentField(),cls,g.max_cycle-moved);
+    }
+    return moved;
+}
+void Fail(const char* stage, const char* message) {
+    faulted=true; for (auto& p : routes) p.second.running=false;
+    Log::GetLog()->error("GathererRouter stopped at {}: {}. Inspect inventory counts before restarting.", stage, message);
+}
+void CommandImpl(AShooterPlayerController* pc,FString* raw) {
+    if (!pc || !raw || !g.enabled || ArkApi::IApiUtils::IsPlayerDead(pc)) return;
+    const int tribe=ArkApi::GetApiUtils().GetTribeID(pc); if (tribe<50000) { Send(pc,"You must be in a tribe."); return; }
+    std::istringstream in(raw->ToString()); std::string root,action,arg; in>>root>>action>>arg;
+    action=S::Lower(action); arg=S::Lower(arg);
+    auto& r=routes[tribe];
+    if (action=="status") { Send(pc,"Router v1.2: hub="+std::to_string(r.hub)+", running="+(r.running?"YES":"NO")+", fault="+(faulted?"YES":"NO")+", sources="+std::to_string(r.sources.size())+", targets="+std::to_string(r.targets.size())); return; }
+    if (action=="stop") { r.running=false; Send(pc,"Router paused."); return; }
+    if (action=="clear") { routes.erase(tribe); Save(); Send(pc,"Route cleared."); return; }
+    if (faulted) { Send(pc,"Router stopped after an error. Check log; restart after inspection."); return; }
+    const auto now=std::chrono::steady_clock::now();
+    if (now<cooldowns[tribe]) { Send(pc,"Wait 2 seconds."); return; } cooldowns[tribe]=now+std::chrono::seconds(2);
+    Log::GetLog()->info("Router command tribe={} action={} stage=begin",tribe,action);
+    if (action=="hub" || action=="source" || action=="target") {
+        if (action=="target" && (arg.empty() || arg.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_")!=std::string::npos)) { Send(pc,"Usage: /router target metalingot (or elementshard, etc.)"); return; }
+        auto* c=Select(pc,tribe,action); if (!c) return;
+        const auto id=c->StructureIDField(); if (!id) { Send(pc,"Storage has no persistent ID yet."); return; }
+        if (action=="hub") { r.hub=id; r.running=false; }
+        else if (action=="source") r.sources.insert(id);
+        else {
+            if (id==r.hub || r.sources.count(id) || Source(c)) { Send(pc,"Target cannot be the hub or a source."); return; }
+            if (S::Dedicated(c)) { S::DediState d;
+                if (!S::ReadDedi(c->MyInventoryComponentField(),d) || S::Name(d.resource).find(arg)==std::string::npos) { Send(pc,"Dedicated resource unsupported/unassigned or does not match the key."); return; }
+            }
+            r.targets[arg]=id;
+        }
+        Save(); Send(pc,"Assigned "+action+" id="+std::to_string(id)+". Test /router run, then /router start.");
+        Log::GetLog()->info("Router assigned tribe={} action={} id={} class={}",tribe,action,id,S::Name(c->ClassField()));
+    } else if (action=="auto") { r.auto_sources=!r.auto_sources; Save(); Send(pc,r.auto_sources?"Automatic source discovery ON":"Automatic source discovery OFF"); }
+    else if (action=="start" || action=="run") {
+        auto* hub=S::Resolve(r.hub,tribe); if (!hub || S::Dedicated(hub)) { Send(pc,"Assign a normal storage with /router hub first."); return; }
+        if (action=="run") { r.running=false; Send(pc,"Test cycle moved "+std::to_string(Process(tribe,r))+" items; router remains paused."); }
+        else { r.running=true; Send(pc,"Router started. It pauses after a server restart."); }
+    } else Send(pc,"/router hub | source | target <class-key> | auto | run | start | stop | status | clear");
+}
+void Command(AShooterPlayerController* pc,FString* raw,EChatSendMode::Type) {
+    try { CommandImpl(pc,raw); }
+    catch(const std::exception& e) { Fail("command",e.what()); Send(pc,"Router stopped after an error. Check log."); }
+    catch(...) { Fail("command","unknown exception"); }
+}
+void Timer() {
+    if (!g.enabled || faulted || ++tick<g.interval) return; tick=0;
+    try { for (auto& p:routes) if (p.second.running) Process(p.first,p.second); }
+    catch(const std::exception& e) { Fail("timer",e.what()); }
+    catch(...) { Fail("timer","unknown exception"); }
+}
+void Reload(APlayerController*,FString*,bool) {
+    try { ReadConfig(); for(auto& p:routes) p.second.running=false; Log::GetLog()->info("Router config reloaded; routes paused"); }
+    catch(const std::exception& e) { Fail("reload",e.what()); }
+}
+}
+extern "C" __declspec(dllexport) void __fastcall Plugin_Init() noexcept {
+    Log::Get().Init("GathererRouter");
+    try {
+        GathererRouter::ReadConfig(); GathererRouter::LoadState(); GathererRouter::registered_command=GathererRouter::g.command;
+        ArkApi::GetCommands().AddChatCommand(FString(GathererRouter::registered_command.c_str()),&GathererRouter::Command);
+        ArkApi::GetCommands().AddOnTimerCallback("GathererRouter.Tick",&GathererRouter::Timer);
+        ArkApi::GetCommands().AddConsoleCommand("GathererRouter.Reload",&GathererRouter::Reload);
+        Log::GetLog()->info("Loaded GathererRouter v1.2: nearest storage selection; all routes paused; no turret hooks");
+    } catch(const std::exception& e) { Log::GetLog()->error("Initialization failed: {}",e.what()); }
+}
+extern "C" __declspec(dllexport) void __fastcall Plugin_Unload() noexcept {
+    try {
+        ArkApi::GetCommands().RemoveChatCommand(FString(GathererRouter::registered_command.c_str()));
+        ArkApi::GetCommands().RemoveOnTimerCallback("GathererRouter.Tick");
+        ArkApi::GetCommands().RemoveConsoleCommand("GathererRouter.Reload");
+    } catch(...) {}
+}

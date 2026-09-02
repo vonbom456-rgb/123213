@@ -1,4 +1,5 @@
 #include <API/ARK/Ark.h>
+#include "StorageSafety.h"
 #include <API/UE/Math/ColorList.h>
 #include <Windows.h>
 #include <algorithm>
@@ -28,6 +29,8 @@ struct Config {
 };
 
 Config g_config;
+bool faulted = false;
+std::string registered_pull, registered_distribute;
 std::unordered_map<unsigned long long, std::chrono::steady_clock::time_point> g_cooldowns;
 using PvpCooldownQuery = bool(__fastcall*)(AShooterPlayerController*);
 
@@ -74,8 +77,9 @@ void ReadConfig() {
     value.pull_command = minijson::str(root, "Commands", "Pull", value.pull_command);
     value.distribute_command = minijson::str(root, "Commands", "Distribute", value.distribute_command);
     value.radius = std::clamp(value.radius, 500.0f, 15000.0f);
-    value.max_per_command = std::clamp(value.max_per_command, 1, 1000000);
+    value.max_per_command = std::clamp(value.max_per_command, 1, 10000);
     value.cooldown_seconds = std::clamp(value.cooldown_seconds, 0, 60);
+    if (!registered_pull.empty()) { value.pull_command = registered_pull; value.distribute_command = registered_distribute; }
     g_config = value;
 }
 
@@ -93,79 +97,20 @@ std::string ItemSearchText(UPrimalItem* item, AShooterPlayerController* pc) {
     return Lower(display.ToString() + " " + FullName(item->ClassField()));
 }
 
-int ExactQuantity(UPrimalInventoryComponent* inv, UClass* cls) {
-    if (!inv || !cls) return 0;
-    return inv->GetItemTemplateQuantity(TSubclassOf<UPrimalItem>(cls), nullptr, true, false, true, true);
-}
-
-int RemoveExact(UPrimalInventoryComponent* inv, UClass* cls, int requested) {
-    if (!inv || !cls || requested <= 0) return 0;
-    const int before = ExactQuantity(inv, cls);
-    int remaining = std::min(requested, before);
-    const TArray<UPrimalItem*> snapshot = inv->InventoryItemsField();
-    for (UPrimalItem* item : snapshot) {
-        if (remaining <= 0) break;
-        if (!IsResource(item) || item->ClassField() != cls) continue;
-        const int qty = item->GetItemQuantity();
-        const int take = std::min(qty, remaining);
-        if (take < qty) {
-            item->SetQuantity(qty - take, true);
-            inv->NotifyClientsItemStatus(item, false, false, true, false, false, nullptr, nullptr, false, false, true);
-            remaining -= take;
-        } else if (inv->RemoveItem(&item->ItemIDField(), false, false, true, true)) {
-            remaining -= take;
-        }
-    }
-    return std::clamp(before - ExactQuantity(inv, cls), 0, requested);
-}
-
-int AddExact(UPrimalInventoryComponent* inv, UClass* cls, int requested) {
-    if (!inv || !cls || requested <= 0) return 0;
-    const int before = ExactQuantity(inv, cls);
-    TSubclassOf<UPrimalItem> no_skin; no_skin.uClass = nullptr;
-    UPrimalItem::AddNewItem(TSubclassOf<UPrimalItem>(cls), inv, false, false, 0.0f, true,
-        requested, false, 0.0f, false, no_skin, 0.0f, false, false);
-    return std::clamp(ExactQuantity(inv, cls) - before, 0, requested);
-}
-
-int SafeTransfer(UPrimalInventoryComponent* from, UPrimalInventoryComponent* to,
-                 UClass* cls, int requested) {
-    if (!from || !to || !cls || requested <= 0) return 0;
-    const int removed = RemoveExact(from, cls, requested);
-    if (removed <= 0) return 0;
-    const int added = AddExact(to, cls, removed);
-    if (added < removed) {
-        const int restored = AddExact(from, cls, removed - added);
-        if (restored != removed - added) {
-            Log::GetLog()->error("ResourceLogistics rollback incomplete class='{}' missing={}",
-                FullName(cls), removed - added - restored);
-        }
-    }
-    return added;
+int ExactQuantity(UPrimalInventoryComponent* inv, UClass* cls) { return StorageSafety::Quantity(inv,cls); }
+int SafeTransfer(UPrimalInventoryComponent* from,UPrimalInventoryComponent* to,UClass* cls,int amount) {
+    return StorageSafety::Transfer(from,to,cls,amount);
 }
 
 std::vector<APrimalStructureItemContainer*> FindContainers(AShooterPlayerController* pc) {
-    std::vector<APrimalStructureItemContainer*> out;
-    AShooterCharacter* character = pc ? pc->GetPlayerCharacter() : nullptr;
-    UWorld* world = ArkApi::GetApiUtils().GetWorld();
-    if (!character || !world || !character->RootComponentField()) return out;
-    const FVector pos = character->RootComponentField()->RelativeLocationField();
-    const int team = ArkApi::GetApiUtils().GetTribeID(pc);
-    TArray<AActor*> actors;
-    UVictoryCore::ServerOctreeOverlapActorsClass(&actors, world, pos, g_config.radius,
-        EServerOctreeGroup::STRUCTURES,
-        TSubclassOf<AActor>(APrimalStructureItemContainer::GetPrivateStaticClass()), true);
-    for (AActor* actor : actors) {
-        if (!actor || !actor->IsA(APrimalStructureItemContainer::GetPrivateStaticClass())) continue;
-        auto* container = static_cast<APrimalStructureItemContainer*>(actor);
-        if (container->TargetingTeamField() != team || !container->MyInventoryComponentField()) continue;
-        out.push_back(container);
-    }
-    return out;
+    return StorageSafety::Nearby(pc ? pc->GetPlayerCharacter() : nullptr,
+        pc ? ArkApi::GetApiUtils().GetTribeID(pc) : 0, g_config.radius);
 }
 
 bool BeginCommand(AShooterPlayerController* pc) {
     if (!g_config.enabled || !pc || ArkApi::IApiUtils::IsPlayerDead(pc)) return false;
+    if (faulted) { Send(pc, "Transfers paused after an error. Check server log."); return false; }
+    if (ArkApi::GetApiUtils().GetTribeID(pc) < 50000) { Send(pc,"You must be in a tribe."); return false; }
     if (IsPvp(pc)) { Send(pc, "Resource commands are blocked during RAID/PvP."); return false; }
     const auto steam = ArkApi::GetApiUtils().GetSteamIdFromController(pc);
     const auto now = std::chrono::steady_clock::now();
@@ -175,40 +120,35 @@ bool BeginCommand(AShooterPlayerController* pc) {
     return true;
 }
 
-void PullCommand(AShooterPlayerController* pc, FString* raw, EChatSendMode::Type) {
+void PullImpl(AShooterPlayerController* pc, FString* raw) {
     if (!BeginCommand(pc) || !raw) return;
     std::istringstream input(raw->ToString());
-    std::string command, query; int requested = 0;
-    input >> command >> query >> requested;
-    query = Lower(query);
-    if (query.empty() || requested <= 0) { Send(pc, "Usage: /pull <resource> <quantity>"); return; }
-    requested = std::min(requested, g_config.max_per_command);
-    AShooterCharacter* character = pc->GetPlayerCharacter();
-    UPrimalInventoryComponent* player_inv = character ? character->MyInventoryComponentField() : nullptr;
-    if (!player_inv) return;
-    int moved = 0;
-    for (auto* container : FindContainers(pc)) {
-        if (moved >= requested) break;
-        UPrimalInventoryComponent* source = container->MyInventoryComponentField();
-        const TArray<UPrimalItem*> items = source->InventoryItemsField();
-        for (UPrimalItem* item : items) {
-            if (moved >= requested) break;
-            if (!IsResource(item) || ItemSearchText(item, pc).find(query) == std::string::npos) continue;
-            const float unit_weight = std::max(0.0f, item->GetItemWeight(true, true));
-            int can_take = requested - moved;
-            if (unit_weight > 0.0f) {
-                const float free_weight = std::max(0.0f,
-                    character->GetMaxStatusValue(EPrimalCharacterStatusValue::Weight) -
-                    character->GetCurrentStatusValue(EPrimalCharacterStatusValue::Weight));
-                can_take = std::min(can_take, static_cast<int>(std::floor(free_weight / unit_weight)));
-            }
-            can_take = std::min(can_take, item->GetItemQuantity());
-            if (can_take <= 0) break;
-            moved += SafeTransfer(source, player_inv, item->ClassField(), can_take);
+    std::string command, query; int requested=0; input>>command>>query>>requested;
+    query=Lower(query);
+    if(query.empty() || requested<=0) { Send(pc,"Usage: /pull <resource> <quantity>"); return; }
+    requested=std::min(requested,g_config.max_per_command);
+    auto* character=pc->GetPlayerCharacter();
+    auto* inv=character ? character->MyInventoryComponentField() : nullptr;
+    if(!inv) return;
+    int moved=0, ops=0;
+    for(auto* c:FindContainers(pc)) {
+        auto* source=c->MyInventoryComponentField();
+        for(auto* cls:StorageSafety::Resources(source)) {
+            if(moved>=requested || ++ops>64) break;
+            // Snapshot classes, never item pointers which a previous transfer can invalidate.
+            auto* prototype=static_cast<UPrimalItem*>(cls->ClassDefaultObjectField());
+            if(!prototype || ItemSearchText(prototype,pc).find(query)==std::string::npos) continue;
+            moved+=SafeTransfer(source,inv,cls,requested-moved);
         }
+        if(moved>=requested || ops>64) break;
     }
-    Send(pc, moved > 0 ? "Pulled " + std::to_string(moved) + " resource item(s)." :
-                        "Nothing was moved: resource not found, or inventory/weight limit reached.");
+    Send(pc,"Pulled "+std::to_string(moved)+" item(s). Unsupported Dedicated Storage is skipped.");
+}
+
+void PullCommand(AShooterPlayerController* pc,FString* raw,EChatSendMode::Type) {
+    try { PullImpl(pc,raw); }
+    catch(const std::exception& e) { faulted=true; Log::GetLog()->error("ResourceLogistics /pull stopped: {}",e.what()); Send(pc,"Transfer error: check log and inventory counts."); }
+    catch(...) { faulted=true; Log::GetLog()->error("ResourceLogistics /pull unknown exception"); }
 }
 
 bool IsDedicated(APrimalStructureItemContainer* container) {
@@ -216,28 +156,28 @@ bool IsDedicated(APrimalStructureItemContainer* container) {
     return name.find("dedicated") != std::string::npos && name.find("storage") != std::string::npos;
 }
 
-void DistributeCommand(AShooterPlayerController* pc, FString*, EChatSendMode::Type) {
-    if (!BeginCommand(pc)) return;
-    AShooterCharacter* character = pc->GetPlayerCharacter();
-    UPrimalInventoryComponent* player_inv = character ? character->MyInventoryComponentField() : nullptr;
-    if (!player_inv) return;
-    const auto containers = FindContainers(pc);
-    int moved = 0;
-    const TArray<UPrimalItem*> player_items = player_inv->InventoryItemsField();
-    for (UPrimalItem* item : player_items) {
-        if (!IsResource(item) || moved >= g_config.max_per_command) continue;
-        APrimalStructureItemContainer* target = nullptr;
-        for (auto* candidate : containers) {
-            if (!IsDedicated(candidate)) continue;
-            UPrimalInventoryComponent* inv = candidate->MyInventoryComponentField();
-            if (ExactQuantity(inv, item->ClassField()) > 0) { target = candidate; break; }
+void DistributeImpl(AShooterPlayerController* pc) {
+    if(!BeginCommand(pc)) return;
+    auto* character=pc->GetPlayerCharacter();
+    auto* inv=character ? character->MyInventoryComponentField() : nullptr;
+    if(!inv) return;
+    const auto containers=FindContainers(pc);
+    int moved=0,ops=0;
+    for(auto* cls:StorageSafety::Resources(inv)) {
+        if(moved>=g_config.max_per_command || ++ops>64) break;
+        for(auto* c:containers) {
+            if(!IsDedicated(c) || !StorageSafety::Accepts(c->MyInventoryComponentField(),cls)) continue;
+            int added=SafeTransfer(inv,c->MyInventoryComponentField(),cls,g_config.max_per_command-moved);
+            moved+=added;
+            if(added>0) break;
         }
-        if (!target) continue;
-        const int amount = std::min(item->GetItemQuantity(), g_config.max_per_command - moved);
-        moved += SafeTransfer(player_inv, target->MyInventoryComponentField(), item->ClassField(), amount);
     }
-    Send(pc, moved > 0 ? "Distributed " + std::to_string(moved) + " resource item(s)." :
-                        "No matching Dedicated Storage was found, or all targets are full.");
+    Send(pc,"Distributed "+std::to_string(moved)+" item(s). Dedicated must have a matching assigned resource.");
+}
+void DistributeCommand(AShooterPlayerController* pc,FString*,EChatSendMode::Type) {
+    try { DistributeImpl(pc); }
+    catch(const std::exception& e) { faulted=true; Log::GetLog()->error("ResourceLogistics /distribute stopped: {}",e.what()); Send(pc,"Transfer error: check log and inventory counts."); }
+    catch(...) { faulted=true; Log::GetLog()->error("ResourceLogistics /distribute unknown exception"); }
 }
 
 void Reload(APlayerController*, FString*, bool) {
@@ -250,10 +190,12 @@ void Reload(APlayerController*, FString*, bool) {
 void Load() {
     Log::Get().Init("ResourceLogistics");
     ResourceLogistics::ReadConfig();
+    ResourceLogistics::registered_pull=ResourceLogistics::g_config.pull_command;
+    ResourceLogistics::registered_distribute=ResourceLogistics::g_config.distribute_command;
     ArkApi::GetCommands().AddChatCommand(FString(ResourceLogistics::g_config.pull_command.c_str()), &ResourceLogistics::PullCommand);
     ArkApi::GetCommands().AddChatCommand(FString(ResourceLogistics::g_config.distribute_command.c_str()), &ResourceLogistics::DistributeCommand);
     ArkApi::GetCommands().AddConsoleCommand("ResourceLogistics.Reload", &ResourceLogistics::Reload);
-    Log::GetLog()->info("Loaded plugin - ResourceLogistics v1.0");
+    Log::GetLog()->info("Loaded plugin - ResourceLogistics v1.1 (checked transfers; no turret access)");
 }
 
 void Unload() {

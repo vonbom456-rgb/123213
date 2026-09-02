@@ -1,5 +1,5 @@
 {
-  "General":{"Enabled":true,"Radius":6000,"IntervalSeconds":10,"MaxItemsPerCycle":100000,"StateFile":"routes.tsv"},
+  "General":{"Enabled":true,"Radius":6000,"IntervalSeconds":10,"MaxItemsPerCycle":10000,"StateFile":"routes.tsv"},
   "Detection":{"SourceClassTokens":["resourcegatherer","gatherer_","structure_gatherer"],"DedicatedClassTokens":["dedicatedstorage","dedicated_storage"]},
   "Commands":{"Root":"/router"}
 }

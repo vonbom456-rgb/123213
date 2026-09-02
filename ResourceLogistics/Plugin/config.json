@@ -2,7 +2,7 @@
   "General": {
     "Enabled": true,
     "Radius": 3000,
-    "MaxItemsPerCommand": 50000,
+    "MaxItemsPerCommand": 10000,
     "CooldownSeconds": 2,
     "BlockDuringPvp": true
   },

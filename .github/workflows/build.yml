@@ -92,7 +92,18 @@ jobs:
           foreach ($name in $names) {
             msbuild "$env:GITHUB_WORKSPACE\$name\$name.sln" `
               /m /p:Configuration=Release /p:Platform=x64 /p:ARKAPI_ROOT="$env:ARKAPI_ROOT"
+            if ($LASTEXITCODE -ne 0) { throw "$name build failed" }
           }
+
+      - name: Test storage transfer accounting
+        shell: pwsh
+        run: |
+          cmake -S ResourceLogistics/Tests -B storage-tests -A x64
+          if ($LASTEXITCODE -ne 0) { throw "Test configure failed" }
+          cmake --build storage-tests --config Release
+          if ($LASTEXITCODE -ne 0) { throw "Test build failed" }
+          ctest --test-dir storage-tests -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw "Storage tests failed" }
 
       - name: Build DinoBalance
         shell: pwsh
@@ -110,7 +121,9 @@ jobs:
             cmake -S "$env:GITHUB_WORKSPACE\$name" `
               -B "$env:GITHUB_WORKSPACE\$name\build" `
               -A x64 -DARKAPI_ROOT="$env:ARKAPI_ROOT"
+            if ($LASTEXITCODE -ne 0) { throw "$name configure failed" }
             cmake --build "$env:GITHUB_WORKSPACE\$name\build" --config Release
+            if ($LASTEXITCODE -ne 0) { throw "$name build failed" }
           }
 
       - name: Collect plugin artifacts
